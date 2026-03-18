@@ -1,0 +1,87 @@
+# mise-tui default configuration
+# Copy to ~/.config/mise-tui/config.toml to customize
+
+[general]
+tick_rate = 250           # base UI tick interval in milliseconds (does not affect widget poll rates)
+
+# ─── Layout ──────────────────────────────────────────────
+
+[layout]
+columns = 2
+rows = 2
+header = true
+footer = true
+
+# Optional: explicit sizing (must sum to exactly 100%)
+# column_widths = ["50%", "50%"]
+# row_heights = ["50%", "50%"]
+
+# Panel definitions: map grid cells to widget instances.
+# Each panel has a `type` (widget kind) and optional `id` (instance name).
+# When `id` is omitted, it defaults to the type name.
+# For multiple instances of the same type, give each a unique `id`.
+
+[[layout.panels]]
+row = 0
+col = 0
+type = "cpu"
+
+[[layout.panels]]
+row = 0
+col = 1
+type = "memory"
+
+[[layout.panels]]
+row = 1
+col = 0
+type = "network"
+
+[[layout.panels]]
+row = 1
+col = 1
+type = "temps"
+
+# ─── Theme ───────────────────────────────────────────────
+# Colors: named (e.g. "cyan"), 256-palette (e.g. "color(123)"), or hex (e.g. "#ff5500")
+# All values must be quoted strings. Unquoted # starts a TOML comment!
+# Style modifiers: "bold", "italic", "underline", "dim" — combine with space: "bold cyan"
+
+[theme]
+border = "gray"
+border_focused = "cyan"
+title = "bold white"
+label = "gray"
+value = "white"
+gauge_fill = "green"
+gauge_bg = "dark_gray"
+sparkline = "cyan"
+ok = "green"
+warning = "yellow"
+critical = "red"
+header_bg = "dark_gray"
+header_fg = "white"
+# Footer reuses header colors
+
+# ─── Widget Settings ────────────────────────────────────
+# Keyed by instance ID (defaults to type name for single instances).
+# All sections are optional — widgets use sensible defaults if absent.
+
+[widgets.cpu]
+mode = "sparklines"       # "sparklines" | "bars" | "gauge"
+history_length = 60
+show_per_core = true
+
+[widgets.memory]
+show_swap = true
+show_processes = true
+process_count = 5
+
+[widgets.network]
+interface = "auto"        # "auto" | specific interface name
+history_length = 60
+unit = "auto"             # "auto" | "KB/s" | "MB/s"
+
+[widgets.temps]
+mode = "gauges"           # "gauges" | "compact"
+warn_threshold = 70
+crit_threshold = 85

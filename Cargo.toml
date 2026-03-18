@@ -1,0 +1,9 @@
+[package]
+name = "mise-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+color-eyre = "0.6"
