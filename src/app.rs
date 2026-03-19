@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::time::Duration;
 
 use color_eyre::Result;
 use ratatui::{
@@ -10,10 +11,13 @@ use ratatui::{
     text::Line,
     widgets::{Block, Paragraph},
 };
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::action::Direction;
 use crate::component::Component;
 use crate::config::Config;
+use crate::data::{DataUpdate, spawn_sysinfo_task};
 use crate::event::{Event, EventHandler};
 use crate::layout::LayoutEngine;
 use crate::registry;
@@ -26,6 +30,8 @@ pub struct App {
     theme: Theme,
     focus: Option<(usize, usize)>,
     tick_rate_ms: u64,
+    cancel: CancellationToken,
+    sysinfo_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -62,6 +68,8 @@ impl App {
             theme,
             focus,
             tick_rate_ms,
+            cancel: CancellationToken::new(),
+            sysinfo_handle: None,
         })
     }
 
@@ -71,45 +79,82 @@ impl App {
     ) -> Result<()> {
         let mut events = EventHandler::new(std::time::Duration::from_millis(self.tick_rate_ms));
 
-        // Placeholder channels for future data and config sources.
-        let (_data_tx, mut data_rx) = tokio::sync::mpsc::channel::<()>(1);
+        // Spawn sysinfo polling task
+        let (data_tx, mut data_rx) = mpsc::channel::<DataUpdate>(32);
+        self.sysinfo_handle = Some(spawn_sysinfo_task(data_tx, self.cancel.clone()));
+
+        // Placeholder for future config reload (M3)
         let (_config_tx, mut config_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        while !self.should_quit {
-            tokio::select! {
-                event = events.next() => {
-                    let event = event?;
-                    match event {
-                        Event::Tick => {
-                            let mut actions = Vec::new();
-                            for component in self.components.values_mut() {
-                                if let Some(action) = component.update()? {
-                                    actions.push(action);
+        let loop_result: Result<()> = async {
+            while !self.should_quit {
+                tokio::select! {
+                    event = events.next() => {
+                        let event = event?;
+                        match event {
+                            Event::Tick => {
+                                let mut actions = Vec::new();
+
+                                // Drain any remaining data updates before drawing
+                                while let Ok(update) = data_rx.try_recv() {
+                                    for component in self.components.values_mut() {
+                                        if let Some(action) = component.handle_data(&update)? {
+                                            actions.push(action);
+                                        }
+                                    }
                                 }
+
+                                for component in self.components.values_mut() {
+                                    if let Some(action) = component.update()? {
+                                        actions.push(action);
+                                    }
+                                }
+                                for action in actions {
+                                    self.handle_action(action);
+                                }
+                                self.draw(terminal)?;
                             }
-                            for action in actions {
-                                self.handle_action(action);
+                            Event::Key(key) => {
+                                self.handle_key(key)?;
                             }
-                            self.draw(terminal)?;
-                        }
-                        Event::Key(key) => {
-                            self.handle_key(key)?;
-                        }
-                        Event::Resize(..) => {
-                            self.draw(terminal)?;
+                            Event::Resize(..) => {
+                                self.draw(terminal)?;
+                            }
                         }
                     }
+                    Some(update) = data_rx.recv() => {
+                        let mut actions = Vec::new();
+                        for component in self.components.values_mut() {
+                            if let Some(action) = component.handle_data(&update)? {
+                                actions.push(action);
+                            }
+                        }
+                        for action in actions {
+                            self.handle_action(action);
+                        }
+                    }
+                    _ = config_rx.recv() => {
+                        // M3: config reload events trigger layout rebuild
+                    }
                 }
-                _ = data_rx.recv() => {
-                    // M2: data updates routed to components via handle_data()
-                }
-                _ = config_rx.recv() => {
-                    // M3: config reload events trigger layout rebuild
-                }
+            }
+            Ok(())
+        }
+        .await;
+
+        // Always shutdown sysinfo task, even on error
+        self.cancel.cancel();
+        if let Some(handle) = self.sysinfo_handle.take() {
+            let abort = handle.abort_handle();
+            if tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .is_err()
+            {
+                abort.abort();
             }
         }
 
-        Ok(())
+        loop_result
     }
 
     fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Result<()> {
@@ -141,9 +186,8 @@ impl App {
     }
 
     fn handle_action(&mut self, action: crate::action::Action) {
-        match action {
-            crate::action::Action::Quit => self.should_quit = true,
-            _ => {}
+        if action == crate::action::Action::Quit {
+            self.should_quit = true;
         }
     }
 

@@ -1,14 +1,3 @@
-mod action;
-mod app;
-mod component;
-mod config;
-mod data;
-mod event;
-mod layout;
-mod registry;
-mod theme;
-mod widgets;
-
 use std::io::{self, stdout};
 
 use color_eyre::Result;
@@ -21,11 +10,14 @@ use ratatui::{
     },
 };
 
+use mise_tui::app;
+use mise_tui::config;
+use mise_tui::registry;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     install_hooks()?;
 
-    // Load and validate config before entering TUI mode
     let config = config::Config::load()?;
     let validation = config.validate(registry::is_known_type);
     for warning in &validation.warnings {
