@@ -30,8 +30,12 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    // Construct app before entering raw mode so widget config errors
+    // print to stderr without leaving the terminal in a broken state.
+    let mut app = app::App::new(config)?;
+
     let mut terminal = init_terminal()?;
-    let app_result = app::App::new(config)?.run(&mut terminal).await;
+    let app_result = app.run(&mut terminal).await;
     restore_terminal()?;
     app_result
 }

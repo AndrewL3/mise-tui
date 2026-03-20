@@ -1,7 +1,7 @@
 use color_eyre::Result;
 
 use crate::component::Component;
-use crate::widgets::PlaceholderWidget;
+use crate::widgets::{CpuWidget, MemoryWidget, NetworkWidget, PlaceholderWidget, TempsWidget};
 
 pub type WidgetConstructor =
     fn(id: String, widget_type: String, config: Option<toml::Value>) -> Result<Box<dyn Component>>;
@@ -10,6 +10,39 @@ pub struct WidgetDescriptor {
     pub constructor: WidgetConstructor,
 }
 
+fn cpu_constructor(
+    id: String,
+    _widget_type: String,
+    config: Option<toml::Value>,
+) -> Result<Box<dyn Component>> {
+    Ok(Box::new(CpuWidget::new(id, config)?))
+}
+
+fn memory_constructor(
+    id: String,
+    _widget_type: String,
+    config: Option<toml::Value>,
+) -> Result<Box<dyn Component>> {
+    Ok(Box::new(MemoryWidget::new(id, config)?))
+}
+
+fn network_constructor(
+    id: String,
+    _widget_type: String,
+    config: Option<toml::Value>,
+) -> Result<Box<dyn Component>> {
+    Ok(Box::new(NetworkWidget::new(id, config)?))
+}
+
+fn temps_constructor(
+    id: String,
+    _widget_type: String,
+    config: Option<toml::Value>,
+) -> Result<Box<dyn Component>> {
+    Ok(Box::new(TempsWidget::new(id, config)?))
+}
+
+#[allow(dead_code)]
 fn placeholder_constructor(
     id: String,
     widget_type: String,
@@ -18,13 +51,30 @@ fn placeholder_constructor(
     Ok(Box::new(PlaceholderWidget::new(id, widget_type)))
 }
 
+static CPU_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
+    constructor: cpu_constructor,
+};
+static MEMORY_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
+    constructor: memory_constructor,
+};
+static NETWORK_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
+    constructor: network_constructor,
+};
+static TEMPS_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
+    constructor: temps_constructor,
+};
+
+#[allow(dead_code)]
 static PLACEHOLDER_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
     constructor: placeholder_constructor,
 };
 
 pub fn get_descriptor(widget_type: &str) -> Option<&'static WidgetDescriptor> {
     match widget_type {
-        "cpu" | "memory" | "network" | "temps" => Some(&PLACEHOLDER_DESCRIPTOR),
+        "cpu" => Some(&CPU_DESCRIPTOR),
+        "memory" => Some(&MEMORY_DESCRIPTOR),
+        "network" => Some(&NETWORK_DESCRIPTOR),
+        "temps" => Some(&TEMPS_DESCRIPTOR),
         _ => None,
     }
 }

@@ -115,8 +115,8 @@ fn collect_network(networks: &Networks) -> NetworkData {
         .iter()
         .map(|(name, data)| InterfaceData {
             name: name.clone(),
-            bytes_sent: data.transmitted(),
-            bytes_received: data.received(),
+            bytes_sent: data.total_transmitted(),
+            bytes_received: data.total_received(),
         })
         .collect();
     NetworkData { interfaces }
