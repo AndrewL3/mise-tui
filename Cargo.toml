@@ -13,3 +13,6 @@ dirs = "6"
 thiserror = "2"
 sysinfo = "0.34"
 tokio-util = { version = "0.7", features = ["rt"] }
+clap = { version = "4", features = ["derive"] }
+notify = "7"
+notify-debouncer-mini = "0.5"

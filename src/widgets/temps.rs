@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use color_eyre::{Result, eyre::eyre};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -111,10 +113,29 @@ impl TempsWidget {
             );
             return;
         }
-        match self.config.mode.as_str() {
-            "compact" => self.draw_compact(frame, area, theme),
-            _ => self.draw_gauges(frame, area, theme),
+
+        // Minimal: single hottest sensor text
+        if area.height < 3 || area.width < 15 {
+            if let Some(sensor) = self.sensors.first() {
+                let temp_str = match sensor.temp_celsius {
+                    Some(t) => format!("{:.0}\u{00B0}C", t),
+                    None => "N/A".to_string(),
+                };
+                let style = self.temp_style(sensor.temp_celsius, theme);
+                let label = format!("{}: {}", sensor.label, temp_str);
+                frame.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), area);
+            }
+            return;
         }
+
+        // Medium: top sensors text only (when too small for gauges)
+        if area.height < 6 || self.config.mode == "compact" {
+            self.draw_compact(frame, area, theme);
+            return;
+        }
+
+        // Full: gauges
+        self.draw_gauges(frame, area, theme);
     }
 
     fn draw_gauges(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -186,6 +207,12 @@ impl Component for TempsWidget {
     fn name(&self) -> &str {
         "Temps"
     }
+    fn widget_type(&self) -> &str {
+        "temps"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn update(&mut self) -> Result<Option<Action>> {
         Ok(None)
     }
@@ -206,10 +233,7 @@ impl Component for TempsWidget {
     }
 
     fn min_size(&self) -> (u16, u16) {
-        match self.config.mode.as_str() {
-            "compact" => (15, 3),
-            _ => (20, 6),
-        }
+        (15, 1)
     }
 }
 
@@ -381,5 +405,28 @@ mod tests {
         w.handle_data(&update).unwrap();
         assert_eq!(w.sensors.len(), 1);
         assert!(w.sensors[0].temp_celsius.is_none());
+    }
+
+    #[test]
+    fn draw_does_not_panic_at_small_sizes() {
+        let mut w = TempsWidget::new("temps".into(), None).unwrap();
+        let update = DataUpdate::Temps(TempData {
+            sensors: vec![SensorData {
+                label: "CPU".into(),
+                temp_celsius: Some(62.0),
+                max_celsius: None,
+                critical_celsius: Some(100.0),
+            }],
+        });
+        w.handle_data(&update).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(15, 2);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::theme::Theme::default();
+        terminal
+            .draw(|frame| {
+                w.draw(frame, frame.area(), &theme);
+            })
+            .unwrap();
     }
 }

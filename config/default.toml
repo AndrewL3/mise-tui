@@ -60,6 +60,7 @@ warning = "yellow"
 critical = "red"
 header_bg = "dark_gray"
 header_fg = "white"
+error_fg = "red"
 # Footer reuses header colors
 
 # ─── Widget Settings ────────────────────────────────────

@@ -20,6 +20,7 @@ pub struct ThemeConfig {
     pub critical: Option<String>,
     pub header_bg: Option<String>,
     pub header_fg: Option<String>,
+    pub error_fg: Option<String>,
 }
 
 /// Resolved theme holding ratatui `Style` and `Color` values ready for use
@@ -39,6 +40,7 @@ pub struct Theme {
     pub critical: Style,
     pub header_bg: Color,
     pub header_fg: Color,
+    pub error_fg: Color,
 }
 
 /// Parse a color string into a ratatui `Color`.
@@ -176,6 +178,7 @@ impl Theme {
             critical: resolve_style!(critical),
             header_bg: resolve_color!(header_bg),
             header_fg: resolve_color!(header_fg),
+            error_fg: resolve_color!(error_fg),
         })
     }
 
@@ -195,6 +198,7 @@ impl Theme {
             critical: Style::new().fg(Color::Red),
             header_bg: Color::DarkGray,
             header_fg: Color::White,
+            error_fg: Color::Red,
         }
     }
 }
@@ -298,6 +302,7 @@ mod tests {
             critical: None,
             header_bg: None,
             header_fg: None,
+            error_fg: None,
         };
         let theme = Theme::from_config(&config).unwrap();
         assert_eq!(theme.border.fg, Some(Color::Gray));
@@ -320,6 +325,7 @@ mod tests {
             critical: None,
             header_bg: None,
             header_fg: None,
+            error_fg: None,
         };
         let theme = Theme::from_config(&config).unwrap();
         assert_eq!(theme.border.fg, Some(Color::Red));
@@ -343,7 +349,14 @@ mod tests {
             critical: None,
             header_bg: None,
             header_fg: None,
+            error_fg: None,
         };
         assert!(Theme::from_config(&config).is_err());
+    }
+
+    #[test]
+    fn theme_default_has_error_fg() {
+        let theme = Theme::default();
+        assert_eq!(theme.error_fg, Color::Red);
     }
 }

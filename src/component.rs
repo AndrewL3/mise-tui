@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use color_eyre::Result;
 use ratatui::{Frame, layout::Rect};
 
@@ -12,6 +14,13 @@ pub trait Component {
 
     /// Human-readable name for display in panel title
     fn name(&self) -> &str;
+
+    /// The widget type name (e.g. "cpu", "memory"). Used during config reload
+    /// to compare widget types and decide whether state can be transferred.
+    fn widget_type(&self) -> &str;
+
+    /// Return self as `&dyn Any` to enable downcasting in `transfer_state`.
+    fn as_any(&self) -> &dyn Any;
 
     /// Called on each tick for internal state management. NOT for data fetching.
     fn update(&mut self) -> Result<Option<Action>>;
@@ -31,4 +40,10 @@ pub trait Component {
     fn min_size(&self) -> (u16, u16) {
         (10, 3)
     }
+
+    /// Copy relevant state (history buffers, baselines) from an old widget
+    /// instance into self. Called during config hot-reload when a widget of
+    /// the same type is rebuilt so that sparklines and throughput baselines
+    /// survive the reload. The default no-op is correct for stateless widgets.
+    fn transfer_state(&mut self, _old: &dyn Component) {}
 }

@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::VecDeque;
 
 use color_eyre::{Result, eyre::eyre};
@@ -85,6 +86,41 @@ impl CpuWidget {
     }
 
     fn draw_content(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        // Minimal: just text label
+        if area.height < 3 || area.width < 15 {
+            let label = format!("CPU: {:.0}%", self.overall);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, theme.value))),
+                area,
+            );
+            return;
+        }
+
+        // Medium: single overall sparkline (when too small for full mode)
+        let full_threshold = match self.config.mode.as_str() {
+            "sparklines" => 6,
+            _ => 4,
+        };
+        if area.height < full_threshold {
+            let label = format!("CPU: {:.0}%", self.overall);
+            let data: &[u64] = self.overall_history.make_contiguous();
+            let [label_area, spark_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, theme.label))),
+                label_area,
+            );
+            frame.render_widget(
+                Sparkline::default()
+                    .data(data)
+                    .style(theme.sparkline)
+                    .max(100),
+                spark_area,
+            );
+            return;
+        }
+
+        // Full mode
         match self.config.mode.as_str() {
             "sparklines" => self.draw_sparklines(frame, area, theme),
             "bars" => self.draw_bars(frame, area, theme),
@@ -227,6 +263,12 @@ impl Component for CpuWidget {
     fn name(&self) -> &str {
         "CPU"
     }
+    fn widget_type(&self) -> &str {
+        "cpu"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     fn update(&mut self) -> Result<Option<Action>> {
         Ok(None)
@@ -265,9 +307,15 @@ impl Component for CpuWidget {
     }
 
     fn min_size(&self) -> (u16, u16) {
-        match self.config.mode.as_str() {
-            "sparklines" => (20, 6),
-            _ => (15, 4),
+        (15, 1)
+    }
+
+    fn transfer_state(&mut self, old: &dyn Component) {
+        if let Some(old_cpu) = old.as_any().downcast_ref::<CpuWidget>() {
+            self.per_core = old_cpu.per_core.clone();
+            self.overall = old_cpu.overall;
+            self.history = old_cpu.history.clone();
+            self.overall_history = old_cpu.overall_history.clone();
         }
     }
 }
@@ -359,5 +407,40 @@ mod tests {
         });
         w.handle_data(&update).unwrap();
         assert!(w.per_core.is_empty());
+    }
+
+    #[test]
+    fn transfer_state_preserves_history() {
+        let mut old = CpuWidget::new("cpu".into(), None).unwrap();
+        let update = DataUpdate::Cpu(crate::data::types::CpuData {
+            per_core: vec![25.0, 50.0],
+            overall: 37.5,
+        });
+        old.handle_data(&update).unwrap();
+        let mut new = CpuWidget::new("cpu".into(), None).unwrap();
+        assert!(new.history.is_empty());
+        new.transfer_state(&old);
+        assert_eq!(new.history.len(), 2);
+        assert_eq!(new.overall_history.len(), 1);
+        assert!((new.overall - 37.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn draw_does_not_panic_at_small_sizes() {
+        let mut w = CpuWidget::new("cpu".into(), None).unwrap();
+        let update = DataUpdate::Cpu(crate::data::types::CpuData {
+            per_core: vec![25.0, 50.0],
+            overall: 37.5,
+        });
+        w.handle_data(&update).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(15, 3);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::theme::Theme::default();
+        terminal
+            .draw(|frame| {
+                w.draw(frame, frame.area(), &theme);
+            })
+            .unwrap();
     }
 }

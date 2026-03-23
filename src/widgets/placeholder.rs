@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use color_eyre::Result;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -27,6 +29,14 @@ impl Component for PlaceholderWidget {
 
     fn name(&self) -> &str {
         &self.widget_type
+    }
+
+    fn widget_type(&self) -> &str {
+        &self.widget_type
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     fn update(&mut self) -> Result<Option<Action>> {

@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -142,6 +143,36 @@ impl NetworkWidget {
             InterfaceState::Active => {}
         }
 
+        let dl_str = format_throughput(self.current_down, &self.config.unit);
+        let ul_str = format_throughput(self.current_up, &self.config.unit);
+
+        // Minimal: single-line text
+        if area.height < 3 || area.width < 15 {
+            let label = format!("\u{2191}{} \u{2193}{}", ul_str, dl_str);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, theme.value))),
+                area,
+            );
+            return;
+        }
+
+        // Medium: two-line up/down numbers, no sparklines
+        if area.height < 5 {
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled("DL: ", theme.label),
+                    Span::styled(&dl_str, theme.value),
+                ]),
+                Line::from(vec![
+                    Span::styled("UL: ", theme.label),
+                    Span::styled(&ul_str, theme.value),
+                ]),
+            ];
+            frame.render_widget(Paragraph::new(lines), area);
+            return;
+        }
+
+        // Full: sparklines + stats line
         let [dl_area, ul_area, stats_area] = Layout::vertical([
             Constraint::Min(2),
             Constraint::Min(2),
@@ -149,7 +180,6 @@ impl NetworkWidget {
         ])
         .areas(area);
 
-        // Download sparkline
         let dl_data: &[u64] = self.download_history.make_contiguous();
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled("DL", theme.label))),
@@ -169,7 +199,6 @@ impl NetworkWidget {
             );
         }
 
-        // Upload sparkline
         let ul_data: &[u64] = self.upload_history.make_contiguous();
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled("UL", theme.label))),
@@ -189,9 +218,6 @@ impl NetworkWidget {
             );
         }
 
-        // Stats line
-        let dl_str = format_throughput(self.current_down, &self.config.unit);
-        let ul_str = format_throughput(self.current_up, &self.config.unit);
         let mut spans = vec![
             Span::styled("DL: ", theme.label),
             Span::styled(dl_str, theme.value),
@@ -212,6 +238,12 @@ impl Component for NetworkWidget {
     }
     fn name(&self) -> &str {
         "Network"
+    }
+    fn widget_type(&self) -> &str {
+        "network"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
     fn update(&mut self) -> Result<Option<Action>> {
         Ok(None)
@@ -277,7 +309,22 @@ impl Component for NetworkWidget {
         Ok(None)
     }
     fn min_size(&self) -> (u16, u16) {
-        (20, 5)
+        (15, 1)
+    }
+
+    fn transfer_state(&mut self, old: &dyn Component) {
+        if let Some(old_net) = old.as_any().downcast_ref::<NetworkWidget>() {
+            self.prev_sent = old_net.prev_sent;
+            self.prev_recv = old_net.prev_recv;
+            self.prev_time = old_net.prev_time;
+            self.prev_iface_names = old_net.prev_iface_names.clone();
+            self.download_history = old_net.download_history.clone();
+            self.upload_history = old_net.upload_history.clone();
+            self.current_down = old_net.current_down;
+            self.current_up = old_net.current_up;
+            self.peak_down = old_net.peak_down;
+            self.peak_up = old_net.peak_up;
+        }
     }
 }
 
@@ -427,6 +474,33 @@ mod tests {
     }
 
     #[test]
+    fn transfer_state_preserves_history() {
+        let mut old = NetworkWidget::new("network".into(), None).unwrap();
+        let update = DataUpdate::Network(NetworkData {
+            interfaces: vec![InterfaceData {
+                name: "eth0".into(),
+                bytes_sent: 1000,
+                bytes_received: 2000,
+            }],
+        });
+        old.handle_data(&update).unwrap();
+        old.prev_time = Some(Instant::now() - std::time::Duration::from_secs(1));
+        let update2 = DataUpdate::Network(NetworkData {
+            interfaces: vec![InterfaceData {
+                name: "eth0".into(),
+                bytes_sent: 2000,
+                bytes_received: 3000,
+            }],
+        });
+        old.handle_data(&update2).unwrap();
+        let mut new = NetworkWidget::new("network".into(), None).unwrap();
+        assert!(new.download_history.is_empty());
+        new.transfer_state(&old);
+        assert_eq!(new.download_history.len(), 1);
+        assert!(new.current_down > 0.0);
+    }
+
+    #[test]
     fn interface_set_change_resets_baseline() {
         let mut w = NetworkWidget::new("network".into(), None).unwrap();
 
@@ -462,5 +536,19 @@ mod tests {
         assert_eq!(w.current_down, 0.0);
         assert_eq!(w.current_up, 0.0);
         assert!(w.download_history.is_empty());
+    }
+
+    #[test]
+    fn draw_does_not_panic_at_small_sizes() {
+        let mut w = NetworkWidget::new("network".into(), None).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(20, 2);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::theme::Theme::default();
+        terminal
+            .draw(|frame| {
+                w.draw(frame, frame.area(), &theme);
+            })
+            .unwrap();
     }
 }

@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use color_eyre::Result;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -84,7 +86,67 @@ impl MemoryWidget {
     }
 
     fn draw_content(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let mut constraints: Vec<Constraint> = vec![Constraint::Length(2)]; // RAM gauge always
+        // Minimal: just text label
+        if area.height < 2 || area.width < 15 {
+            let ram_ratio = Self::safe_ratio(self.used_mem, self.total_mem);
+            let label = format!(
+                "RAM: {}/{} ({:.0}%)",
+                format_bytes(self.used_mem),
+                format_bytes(self.total_mem),
+                ram_ratio * 100.0,
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, theme.value))),
+                area,
+            );
+            return;
+        }
+
+        // Medium: gauges only, no process list
+        if area.height < 6 {
+            let mut constraints: Vec<Constraint> = vec![Constraint::Length(2)];
+            let show_swap = self.config.show_swap && self.total_swap > 0 && area.height >= 4;
+            if show_swap {
+                constraints.push(Constraint::Length(2));
+            }
+            let areas = Layout::vertical(constraints).split(area);
+            let mut area_idx = 0;
+
+            let ram_ratio = Self::safe_ratio(self.used_mem, self.total_mem);
+            let ram_label = format!(
+                "RAM: {} / {} ({:.0}%)",
+                format_bytes(self.used_mem),
+                format_bytes(self.total_mem),
+                ram_ratio * 100.0
+            );
+            let ram_gauge = Gauge::default()
+                .gauge_style(Self::gauge_style(theme))
+                .ratio(ram_ratio)
+                .label(ram_label)
+                .use_unicode(true);
+            frame.render_widget(ram_gauge, areas[area_idx]);
+            area_idx += 1;
+
+            if show_swap {
+                let swap_ratio = Self::safe_ratio(self.used_swap, self.total_swap);
+                let swap_label = format!(
+                    "Swap: {} / {} ({:.0}%)",
+                    format_bytes(self.used_swap),
+                    format_bytes(self.total_swap),
+                    swap_ratio * 100.0
+                );
+                let swap_gauge = Gauge::default()
+                    .gauge_style(Self::gauge_style(theme))
+                    .ratio(swap_ratio)
+                    .label(swap_label)
+                    .use_unicode(true);
+                frame.render_widget(swap_gauge, areas[area_idx]);
+            }
+            return;
+        }
+
+        // Full mode: existing implementation with gauges + process list
+        let mut constraints: Vec<Constraint> = vec![Constraint::Length(2)];
         let show_swap = self.config.show_swap && self.total_swap > 0;
         if show_swap {
             constraints.push(Constraint::Length(2));
@@ -112,7 +174,6 @@ impl MemoryWidget {
         frame.render_widget(ram_gauge, areas[area_idx]);
         area_idx += 1;
 
-        // Swap gauge
         if show_swap {
             let swap_ratio = Self::safe_ratio(self.used_swap, self.total_swap);
             let swap_label = format!(
@@ -148,7 +209,6 @@ impl MemoryWidget {
                 let mut name = proc.name.clone();
                 if name.len() > max_name_width {
                     let trunc_to = max_name_width.saturating_sub(1);
-                    // Find a valid UTF-8 char boundary to avoid panic
                     let boundary = name
                         .char_indices()
                         .take_while(|&(i, _)| i <= trunc_to)
@@ -184,6 +244,12 @@ impl Component for MemoryWidget {
     fn name(&self) -> &str {
         "Memory"
     }
+    fn widget_type(&self) -> &str {
+        "memory"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn update(&mut self) -> Result<Option<Action>> {
         Ok(None)
     }
@@ -209,11 +275,7 @@ impl Component for MemoryWidget {
     }
 
     fn min_size(&self) -> (u16, u16) {
-        if self.config.show_processes {
-            (20, 10)
-        } else {
-            (20, 4)
-        }
+        (15, 1)
     }
 }
 
@@ -325,5 +387,27 @@ mod tests {
         });
         w.handle_data(&update).unwrap();
         assert_eq!(w.total_mem, 0);
+    }
+
+    #[test]
+    fn draw_does_not_panic_at_small_sizes() {
+        let mut w = MemoryWidget::new("memory".into(), None).unwrap();
+        let update = DataUpdate::Memory(MemoryData {
+            total_mem: 16_000_000_000,
+            used_mem: 4_200_000_000,
+            total_swap: 0,
+            used_swap: 0,
+            top_processes: vec![],
+        });
+        w.handle_data(&update).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(20, 2);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::theme::Theme::default();
+        terminal
+            .draw(|frame| {
+                w.draw(frame, frame.area(), &theme);
+            })
+            .unwrap();
     }
 }

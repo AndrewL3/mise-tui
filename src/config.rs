@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::theme::ThemeConfig;
 
-const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
+pub const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 fn default_true() -> bool {
     true
@@ -134,21 +134,29 @@ impl Config {
         Ok(config)
     }
 
-    /// Load config from `~/.config/mise-tui/config.toml`, writing the embedded
-    /// default if the file does not yet exist.
-    pub fn load() -> Result<Self> {
-        let path = config_path()?;
-
-        if !path.exists() {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+    /// Load config from a given path, or from `~/.config/mise-tui/config.toml`
+    /// if `None` is passed, writing the embedded default if the file does not
+    /// yet exist.
+    pub fn load(path: Option<&std::path::Path>) -> Result<Self> {
+        match path {
+            Some(p) => {
+                let contents = std::fs::read_to_string(p)
+                    .map_err(|e| eyre!("failed to read config file {}: {e}", p.display()))?;
+                Self::parse(&contents)
             }
-            std::fs::write(&path, DEFAULT_CONFIG)?;
+            None => {
+                let p = config_path()?;
+                if !p.exists() {
+                    if let Some(parent) = p.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&p, DEFAULT_CONFIG)?;
+                }
+                let contents = std::fs::read_to_string(&p)
+                    .map_err(|e| eyre!("failed to read config file {}: {e}", p.display()))?;
+                Self::parse(&contents)
+            }
         }
-
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| eyre!("failed to read config file {}: {e}", path.display()))?;
-        Self::parse(&contents)
     }
 
     /// Validate the parsed config against a registry-provided type predicate.
@@ -708,6 +716,28 @@ mod tests {
                 .any(|e| matches!(e, ConfigError::InvalidInstanceId { .. }))
         );
     }
+
+    // ── Phase 3: Config::load tests ────────────────────────────────────────────
+
+    #[test]
+    fn load_explicit_path_valid() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/default.toml");
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!(config.general.tick_rate, 250);
+    }
+
+    #[test]
+    fn load_explicit_path_missing_errors() {
+        let path = std::path::Path::new("/tmp/nonexistent-mise-tui-config.toml");
+        assert!(Config::load(Some(path)).is_err());
+    }
+
+    #[test]
+    fn load_none_uses_default_path() {
+        let _ = Config::load(None);
+    }
+
+    // ── Validation tests (continued) ────────────────────────────────────────
 
     #[test]
     fn validate_empty_panels_is_warning_not_error() {

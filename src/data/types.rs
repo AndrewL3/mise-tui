@@ -10,6 +10,19 @@ pub enum DataUpdate {
     },
 }
 
+impl DataUpdate {
+    /// Returns true if this update variant corresponds to the given widget type.
+    pub fn matches_widget_type(&self, widget_type: &str) -> bool {
+        matches!(
+            (self, widget_type),
+            (DataUpdate::Cpu(_), "cpu")
+                | (DataUpdate::Memory(_), "memory")
+                | (DataUpdate::Network(_), "network")
+                | (DataUpdate::Temps(_), "temps")
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CpuData {
     pub per_core: Vec<f32>,
