@@ -325,9 +325,9 @@ mod tests {
     fn parse_default_config() {
         let config = Config::parse(DEFAULT_CONFIG).unwrap();
         assert_eq!(config.general.tick_rate, 250);
-        assert_eq!(config.layout.columns, 2);
+        assert_eq!(config.layout.columns, 3);
         assert_eq!(config.layout.rows, 2);
-        assert_eq!(config.layout.panels.len(), 4);
+        assert_eq!(config.layout.panels.len(), 6);
         assert!(config.layout.header);
         assert!(config.layout.footer);
     }
@@ -457,7 +457,10 @@ mod tests {
     // ── Phase 2: Validation tests ─────────────────────────────────────────────
 
     fn known_type(t: &str) -> bool {
-        matches!(t, "cpu" | "memory" | "network" | "temps")
+        matches!(
+            t,
+            "cpu" | "memory" | "network" | "temps" | "disk" | "processes"
+        )
     }
 
     #[test]

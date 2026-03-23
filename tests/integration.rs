@@ -20,10 +20,10 @@ fn default_config_end_to_end() {
     assert!(layout.contains_key("panels"));
 
     let panels = layout["panels"].as_array().unwrap();
-    assert_eq!(panels.len(), 4, "default config should have 4 panels");
+    assert_eq!(panels.len(), 6, "default config should have 6 panels");
 
     // Each panel has required fields and known type
-    let known_types = ["cpu", "memory", "network", "temps"];
+    let known_types = ["cpu", "memory", "network", "temps", "disk", "processes"];
     for panel in panels {
         let panel = panel.as_table().unwrap();
         assert!(panel.contains_key("row"));

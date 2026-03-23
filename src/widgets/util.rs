@@ -45,6 +45,16 @@ pub fn push_capped(buf: &mut VecDeque<u64>, val: u64, cap: usize) {
     }
 }
 
+pub fn push_capped_f64(buf: &mut VecDeque<f64>, val: f64, cap: usize) {
+    if cap == 0 {
+        return;
+    }
+    buf.push_back(val);
+    while buf.len() > cap {
+        buf.pop_front();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +143,14 @@ mod tests {
         let mut buf = VecDeque::new();
         push_capped(&mut buf, 1, 0);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn push_capped_f64_at_cap() {
+        let mut buf = VecDeque::from(vec![1.0, 2.0, 3.0]);
+        push_capped_f64(&mut buf, 4.0, 3);
+        assert_eq!(buf.len(), 3);
+        assert!((buf[0] - 2.0).abs() < f64::EPSILON);
+        assert!((buf[2] - 4.0).abs() < f64::EPSILON);
     }
 }

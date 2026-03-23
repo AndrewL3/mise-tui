@@ -8,6 +8,8 @@ pub enum Action {
     Tick,
     Resize(u16, u16),
     Notify(String),
+    EnterInteract,
+    ExitInteract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

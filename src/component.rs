@@ -46,4 +46,15 @@ pub trait Component {
     /// the same type is rebuilt so that sparklines and throughput baselines
     /// survive the reload. The default no-op is correct for stateless widgets.
     fn transfer_state(&mut self, _old: &dyn Component) {}
+
+    /// Whether this widget supports interact mode (Enter to engage,
+    /// Escape to disengage). Default false — only interactive widgets
+    /// like the process list override this.
+    fn supports_interact(&self) -> bool {
+        false
+    }
+
+    /// Called by App to notify the widget that interact mode has been
+    /// entered or exited. Only meaningful for widgets where supports_interact() is true.
+    fn notify_interact(&mut self, _active: bool) {}
 }

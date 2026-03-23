@@ -7,14 +7,10 @@ tick_rate = 250           # base UI tick interval in milliseconds (does not affe
 # ─── Layout ──────────────────────────────────────────────
 
 [layout]
-columns = 2
+columns = 3
 rows = 2
 header = true
 footer = true
-
-# Optional: explicit sizing (must sum to exactly 100%)
-# column_widths = ["50%", "50%"]
-# row_heights = ["50%", "50%"]
 
 # Panel definitions: map grid cells to widget instances.
 # Each panel has a `type` (widget kind) and optional `id` (instance name).
@@ -32,6 +28,11 @@ col = 1
 type = "memory"
 
 [[layout.panels]]
+row = 0
+col = 2
+type = "processes"
+
+[[layout.panels]]
 row = 1
 col = 0
 type = "network"
@@ -41,6 +42,11 @@ row = 1
 col = 1
 type = "temps"
 
+[[layout.panels]]
+row = 1
+col = 2
+type = "disk"
+
 # ─── Theme ───────────────────────────────────────────────
 # Colors: named (e.g. "cyan"), 256-palette (e.g. "color(123)"), or hex (e.g. "#ff5500")
 # All values must be quoted strings. Unquoted # starts a TOML comment!
@@ -49,6 +55,7 @@ type = "temps"
 [theme]
 border = "gray"
 border_focused = "cyan"
+border_interact = "yellow"
 title = "bold white"
 label = "gray"
 value = "white"
@@ -86,3 +93,12 @@ unit = "auto"             # "auto" | "KB/s" | "MB/s"
 mode = "gauges"           # "gauges" | "compact"
 warn_threshold = 70
 crit_threshold = 85
+
+[widgets.disk]
+mode = "capacity"
+mounts = ["auto"]
+
+[widgets.processes]
+sort_by = "cpu"
+sort_order = "desc"
+count = 50

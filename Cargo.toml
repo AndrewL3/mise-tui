@@ -16,3 +16,4 @@ tokio-util = { version = "0.7", features = ["rt"] }
 clap = { version = "4", features = ["derive"] }
 notify = "7"
 notify-debouncer-mini = "0.5"
+nix = { version = "0.29", features = ["signal"] }

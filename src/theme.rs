@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub struct ThemeConfig {
     pub border: Option<String>,
     pub border_focused: Option<String>,
+    pub border_interact: Option<String>,
     pub title: Option<String>,
     pub label: Option<String>,
     pub value: Option<String>,
@@ -29,6 +30,7 @@ pub struct ThemeConfig {
 pub struct Theme {
     pub border: Style,
     pub border_focused: Style,
+    pub border_interact: Style,
     pub title: Style,
     pub label: Style,
     pub value: Style,
@@ -167,6 +169,7 @@ impl Theme {
         Ok(Theme {
             border: resolve_style!(border),
             border_focused: resolve_style!(border_focused),
+            border_interact: resolve_style!(border_interact),
             title: resolve_style!(title),
             label: resolve_style!(label),
             value: resolve_style!(value),
@@ -187,6 +190,7 @@ impl Theme {
         Theme {
             border: Style::new().fg(Color::Gray),
             border_focused: Style::new().fg(Color::Cyan),
+            border_interact: Style::new().fg(Color::Yellow),
             title: Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
             label: Style::new().fg(Color::Gray),
             value: Style::new().fg(Color::White),
@@ -291,6 +295,7 @@ mod tests {
         let config = ThemeConfig {
             border: None,
             border_focused: None,
+            border_interact: None,
             title: None,
             label: None,
             value: None,
@@ -314,6 +319,7 @@ mod tests {
         let config = ThemeConfig {
             border: Some("red".to_string()),
             border_focused: Some("bold green".to_string()),
+            border_interact: None,
             title: None,
             label: None,
             value: None,
@@ -338,6 +344,7 @@ mod tests {
         let config = ThemeConfig {
             border: Some("not_a_color".to_string()),
             border_focused: None,
+            border_interact: None,
             title: None,
             label: None,
             value: None,
@@ -358,5 +365,22 @@ mod tests {
     fn theme_default_has_error_fg() {
         let theme = Theme::default();
         assert_eq!(theme.error_fg, Color::Red);
+    }
+
+    #[test]
+    fn theme_default_has_border_interact() {
+        let theme = Theme::default();
+        assert_eq!(theme.border_interact.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn theme_from_config_border_interact_override() {
+        let config = ThemeConfig {
+            border_interact: Some("bold green".to_string()),
+            ..ThemeConfig::default()
+        };
+        let theme = Theme::from_config(&config).unwrap();
+        assert_eq!(theme.border_interact.fg, Some(Color::Green));
+        assert!(theme.border_interact.add_modifier.contains(Modifier::BOLD));
     }
 }

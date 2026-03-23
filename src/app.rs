@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,6 +46,8 @@ pub struct App {
     sysinfo_restarting: bool,
     sysinfo_disconnected: bool,
     show_help: bool,
+    interact_mode: bool,
+    undersized_panels: HashSet<String>,
 }
 
 impl App {
@@ -100,6 +102,8 @@ impl App {
             sysinfo_restarting: false,
             sysinfo_disconnected: false,
             show_help: false,
+            interact_mode: false,
+            undersized_panels: HashSet::new(),
         })
     }
 
@@ -275,7 +279,7 @@ impl App {
     }
 
     fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Result<()> {
-        // When help overlay is shown, only ? and Esc dismiss it
+        // Tier 0: Help overlay captures all input when shown
         if self.show_help {
             match key.code {
                 KeyCode::Char('?') | KeyCode::Esc => self.show_help = false,
@@ -284,17 +288,45 @@ impl App {
             return Ok(());
         }
 
+        // Tier 1: Always handled by App, regardless of mode
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+                return Ok(());
+            }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
+                return Ok(());
             }
-            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                return Ok(());
+            }
             KeyCode::Char('r') => {
                 if let Some(tx) = &self.config_tx {
                     let _ = tx.try_send(());
                 }
+                return Ok(());
             }
+            _ => {}
+        }
+
+        // Tier 2: Interact mode — route to focused widget
+        if self.interact_mode {
+            if let Some(focus_pos) = self.focus
+                && let Some(instance_id) = self.layout.instance_at(focus_pos.0, focus_pos.1)
+                && let Some(component) = self.components.get_mut(instance_id)
+            {
+                let event = Event::Key(key);
+                if let Some(action) = component.handle_event(&event)? {
+                    self.handle_action(action);
+                }
+            }
+            return Ok(());
+        }
+
+        // Tier 3: Normal mode — focus navigation + dispatch
+        match key.code {
             KeyCode::Tab => self.focus_next(),
             KeyCode::BackTab => self.focus_prev(),
             KeyCode::Up => self.focus_direction(Direction::Up),
@@ -302,7 +334,6 @@ impl App {
             KeyCode::Left => self.focus_direction(Direction::Left),
             KeyCode::Right => self.focus_direction(Direction::Right),
             _ => {
-                // Dispatch to focused component
                 if let Some(focus_pos) = self.focus
                     && let Some(instance_id) = self.layout.instance_at(focus_pos.0, focus_pos.1)
                     && let Some(component) = self.components.get_mut(instance_id)
@@ -321,6 +352,26 @@ impl App {
         match action {
             crate::action::Action::Quit => self.should_quit = true,
             crate::action::Action::Notify(msg) => self.set_notification(msg),
+            crate::action::Action::EnterInteract => {
+                if let Some(focus) = self.focus
+                    && let Some(id) = self.layout.instance_at(focus.0, focus.1)
+                    && !self.undersized_panels.contains(id)
+                {
+                    self.interact_mode = true;
+                    if let Some(component) = self.components.get_mut(id) {
+                        component.notify_interact(true);
+                    }
+                }
+            }
+            crate::action::Action::ExitInteract => {
+                self.interact_mode = false;
+                if let Some(focus) = self.focus
+                    && let Some(id) = self.layout.instance_at(focus.0, focus.1)
+                    && let Some(component) = self.components.get_mut(id)
+                {
+                    component.notify_interact(false);
+                }
+            }
             _ => {}
         }
     }
@@ -413,6 +464,7 @@ impl App {
         self.layout = new_layout;
         self.theme = new_theme;
         self.error_states.clear();
+        self.interact_mode = false;
 
         // Recompute focus
         let occupied = self.layout.occupied_cells();
@@ -555,6 +607,7 @@ impl App {
             }
 
             // Render grid cells
+            self.undersized_panels.clear();
             let all_rects = self.layout.resolve_all_rects(area);
             let (rows, cols) = self.layout.grid_dimensions();
 
@@ -566,7 +619,9 @@ impl App {
                     };
 
                     let is_focused = self.focus == Some((row, col));
-                    let border_style = if is_focused {
+                    let border_style = if is_focused && self.interact_mode {
+                        self.theme.border_interact
+                    } else if is_focused {
                         self.theme.border_focused
                     } else {
                         self.theme.border
@@ -606,6 +661,7 @@ impl App {
                         } else {
                             let (min_w, min_h) = component.min_size();
                             if inner.width < min_w || inner.height < min_h {
+                                self.undersized_panels.insert(id.to_string());
                                 let placeholder =
                                     Paragraph::new(Line::from(component.name().to_string()))
                                         .alignment(ratatui::layout::Alignment::Center);
@@ -626,6 +682,8 @@ impl App {
 
                 let text = if let Some((ref msg, _)) = self.notification {
                     format!(" {} ", msg)
+                } else if self.interact_mode {
+                    " [INTERACT] j/k: scroll | s/S: sort | x: signal | Esc: exit ".to_string()
                 } else {
                     " q: quit | Tab/Shift+Tab: cycle focus | Arrow keys: navigate | ?: help "
                         .to_string()
@@ -675,6 +733,22 @@ impl App {
                         Span::styled("   ?                  ", self.theme.value),
                         Span::styled("Toggle this help", self.theme.label),
                     ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Interact Mode",
+                        Style::new()
+                            .fg(self.theme.header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("   Enter              ", self.theme.value),
+                        Span::styled("Enter interact mode", self.theme.label),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   Escape             ", self.theme.value),
+                        Span::styled("Exit interact mode", self.theme.label),
+                    ]),
                 ];
 
                 let help_block = Block::bordered()
@@ -688,6 +762,19 @@ impl App {
                 frame.render_widget(help_paragraph, area);
             }
         })?;
+
+        // Post-draw: exit interact mode if focused widget became undersized
+        if self.interact_mode
+            && let Some(focus) = self.focus
+            && let Some(id) = self.layout.instance_at(focus.0, focus.1)
+            && self.undersized_panels.contains(id)
+        {
+            self.interact_mode = false;
+            if let Some(component) = self.components.get_mut(id) {
+                component.notify_interact(false);
+            }
+        }
+
         Ok(())
     }
 }
@@ -771,5 +858,25 @@ mod tests {
         let path = PathBuf::from("config/default.toml");
         let app = App::new(config, path.clone()).unwrap();
         assert_eq!(app.config_path, path);
+    }
+
+    #[test]
+    fn handle_action_enter_interact() {
+        let config = crate::config::Config::parse(include_str!("../config/default.toml")).unwrap();
+        let path = PathBuf::from("config/default.toml");
+        let mut app = App::new(config, path).unwrap();
+        assert!(!app.interact_mode);
+        app.handle_action(crate::action::Action::EnterInteract);
+        assert!(app.interact_mode);
+    }
+
+    #[test]
+    fn handle_action_exit_interact() {
+        let config = crate::config::Config::parse(include_str!("../config/default.toml")).unwrap();
+        let path = PathBuf::from("config/default.toml");
+        let mut app = App::new(config, path).unwrap();
+        app.interact_mode = true;
+        app.handle_action(crate::action::Action::ExitInteract);
+        assert!(!app.interact_mode);
     }
 }

@@ -4,6 +4,8 @@ pub enum DataUpdate {
     Memory(MemoryData),
     Network(NetworkData),
     Temps(TempData),
+    Disk(DiskData),
+    Process(ProcessData),
     External {
         instance_id: String,
         result: Result<ExternalData, String>,
@@ -19,6 +21,8 @@ impl DataUpdate {
                 | (DataUpdate::Memory(_), "memory")
                 | (DataUpdate::Network(_), "network")
                 | (DataUpdate::Temps(_), "temps")
+                | (DataUpdate::Disk(_), "disk")
+                | (DataUpdate::Process(_), "processes")
         )
     }
 }
@@ -72,6 +76,50 @@ pub struct SensorData {
 
 #[derive(Debug, Clone)]
 pub struct ExternalData {}
+
+#[derive(Debug, Clone)]
+pub struct DiskData {
+    pub disks: Vec<DiskInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiskInfo {
+    pub mount_point: String,
+    pub device_name: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub io: Option<DiskIoStats>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiskIoStats {
+    pub read_bytes_per_sec: f64,
+    pub write_bytes_per_sec: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessData {
+    pub processes: Vec<ProcessEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessEntry {
+    pub pid: u32,
+    pub name: String,
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
+    pub memory_percent: f32,
+    pub status: ProcessStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessStatus {
+    Running,
+    Sleeping,
+    Stopped,
+    Zombie,
+    Other(String),
+}
 
 #[cfg(test)]
 mod tests {
@@ -158,7 +206,82 @@ mod tests {
             }),
             DataUpdate::Network(NetworkData { interfaces: vec![] }),
             DataUpdate::Temps(TempData { sensors: vec![] }),
+            DataUpdate::Disk(DiskData { disks: vec![] }),
+            DataUpdate::Process(ProcessData { processes: vec![] }),
         ];
-        assert_eq!(updates.len(), 4);
+        assert_eq!(updates.len(), 6);
+    }
+
+    #[test]
+    fn disk_data_stores_disks() {
+        let data = DiskData {
+            disks: vec![DiskInfo {
+                mount_point: "/".to_string(),
+                device_name: "sda1".to_string(),
+                total_bytes: 500_000_000_000,
+                available_bytes: 200_000_000_000,
+                io: Some(DiskIoStats {
+                    read_bytes_per_sec: 1_000_000.0,
+                    write_bytes_per_sec: 500_000.0,
+                }),
+            }],
+        };
+        assert_eq!(data.disks.len(), 1);
+        assert_eq!(data.disks[0].mount_point, "/");
+        assert!(data.disks[0].io.is_some());
+    }
+
+    #[test]
+    fn disk_info_io_none_for_unresolvable() {
+        let info = DiskInfo {
+            mount_point: "/mnt/lvm".to_string(),
+            device_name: "dm-0".to_string(),
+            total_bytes: 100_000_000,
+            available_bytes: 50_000_000,
+            io: None,
+        };
+        assert!(info.io.is_none());
+    }
+
+    #[test]
+    fn process_data_stores_entries() {
+        let data = ProcessData {
+            processes: vec![ProcessEntry {
+                pid: 1234,
+                name: "firefox".to_string(),
+                cpu_percent: 12.5,
+                memory_bytes: 500_000_000,
+                memory_percent: 3.1,
+                status: ProcessStatus::Running,
+            }],
+        };
+        assert_eq!(data.processes.len(), 1);
+        assert_eq!(data.processes[0].pid, 1234);
+    }
+
+    #[test]
+    fn process_status_variants() {
+        let statuses = vec![
+            ProcessStatus::Running,
+            ProcessStatus::Sleeping,
+            ProcessStatus::Stopped,
+            ProcessStatus::Zombie,
+            ProcessStatus::Other("unknown".to_string()),
+        ];
+        assert_eq!(statuses.len(), 5);
+    }
+
+    #[test]
+    fn matches_widget_type_disk() {
+        let update = DataUpdate::Disk(DiskData { disks: vec![] });
+        assert!(update.matches_widget_type("disk"));
+        assert!(!update.matches_widget_type("cpu"));
+    }
+
+    #[test]
+    fn matches_widget_type_processes() {
+        let update = DataUpdate::Process(ProcessData { processes: vec![] });
+        assert!(update.matches_widget_type("processes"));
+        assert!(!update.matches_widget_type("memory"));
     }
 }
