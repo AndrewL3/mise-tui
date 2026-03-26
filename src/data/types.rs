@@ -6,10 +6,8 @@ pub enum DataUpdate {
     Temps(TempData),
     Disk(DiskData),
     Process(ProcessData),
-    External {
-        instance_id: String,
-        result: Result<ExternalData, String>,
-    },
+    Packages(PackagesResult),
+    Services(ServicesResult),
 }
 
 impl DataUpdate {
@@ -23,6 +21,8 @@ impl DataUpdate {
                 | (DataUpdate::Temps(_), "temps")
                 | (DataUpdate::Disk(_), "disk")
                 | (DataUpdate::Process(_), "processes")
+                | (DataUpdate::Packages(_), "packages")
+                | (DataUpdate::Services(_), "services")
         )
     }
 }
@@ -75,9 +75,6 @@ pub struct SensorData {
 }
 
 #[derive(Debug, Clone)]
-pub struct ExternalData {}
-
-#[derive(Debug, Clone)]
 pub struct DiskData {
     pub disks: Vec<DiskInfo>,
 }
@@ -118,6 +115,52 @@ pub enum ProcessStatus {
     Sleeping,
     Stopped,
     Zombie,
+    Other(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct PackagesResult {
+    pub instance_id: String,
+    pub data: Result<PackagesData, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackagesData {
+    pub updates: Vec<PackageUpdate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageUpdate {
+    pub name: String,
+    pub old_version: String,
+    pub new_version: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServicesResult {
+    pub instance_id: String,
+    pub data: Result<ServicesData, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServicesData {
+    pub services: Vec<ServiceStatus>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceStatus {
+    pub name: String,
+    pub active_state: ActiveState,
+    pub sub_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActiveState {
+    Active,
+    Inactive,
+    Failed,
+    Activating,
+    Deactivating,
     Other(String),
 }
 
@@ -208,8 +251,16 @@ mod tests {
             DataUpdate::Temps(TempData { sensors: vec![] }),
             DataUpdate::Disk(DiskData { disks: vec![] }),
             DataUpdate::Process(ProcessData { processes: vec![] }),
+            DataUpdate::Packages(PackagesResult {
+                instance_id: "packages".to_string(),
+                data: Ok(PackagesData { updates: vec![] }),
+            }),
+            DataUpdate::Services(ServicesResult {
+                instance_id: "services".to_string(),
+                data: Ok(ServicesData { services: vec![] }),
+            }),
         ];
-        assert_eq!(updates.len(), 6);
+        assert_eq!(updates.len(), 8);
     }
 
     #[test]
@@ -282,6 +333,80 @@ mod tests {
     fn matches_widget_type_processes() {
         let update = DataUpdate::Process(ProcessData { processes: vec![] });
         assert!(update.matches_widget_type("processes"));
+        assert!(!update.matches_widget_type("memory"));
+    }
+
+    #[test]
+    fn packages_result_stores_data() {
+        let result = PackagesResult {
+            instance_id: "packages".to_string(),
+            data: Ok(PackagesData {
+                updates: vec![PackageUpdate {
+                    name: "linux".to_string(),
+                    old_version: "6.8.1".to_string(),
+                    new_version: "6.8.2".to_string(),
+                }],
+            }),
+        };
+        assert_eq!(result.instance_id, "packages");
+        assert!(result.data.is_ok());
+        assert_eq!(result.data.unwrap().updates.len(), 1);
+    }
+
+    #[test]
+    fn packages_result_stores_error() {
+        let result = PackagesResult {
+            instance_id: "packages".to_string(),
+            data: Err("checkupdates not found".to_string()),
+        };
+        assert!(result.data.is_err());
+    }
+
+    #[test]
+    fn services_result_stores_data() {
+        let result = ServicesResult {
+            instance_id: "services".to_string(),
+            data: Ok(ServicesData {
+                services: vec![ServiceStatus {
+                    name: "sshd".to_string(),
+                    active_state: ActiveState::Active,
+                    sub_state: "running".to_string(),
+                }],
+            }),
+        };
+        assert!(result.data.is_ok());
+    }
+
+    #[test]
+    fn active_state_variants() {
+        let states = vec![
+            ActiveState::Active,
+            ActiveState::Inactive,
+            ActiveState::Failed,
+            ActiveState::Activating,
+            ActiveState::Deactivating,
+            ActiveState::Other("maintenance".to_string()),
+        ];
+        assert_eq!(states.len(), 6);
+    }
+
+    #[test]
+    fn matches_widget_type_packages() {
+        let update = DataUpdate::Packages(PackagesResult {
+            instance_id: "packages".to_string(),
+            data: Ok(PackagesData { updates: vec![] }),
+        });
+        assert!(update.matches_widget_type("packages"));
+        assert!(!update.matches_widget_type("cpu"));
+    }
+
+    #[test]
+    fn matches_widget_type_services() {
+        let update = DataUpdate::Services(ServicesResult {
+            instance_id: "services".to_string(),
+            data: Ok(ServicesData { services: vec![] }),
+        });
+        assert!(update.matches_widget_type("services"));
         assert!(!update.matches_widget_type("memory"));
     }
 }

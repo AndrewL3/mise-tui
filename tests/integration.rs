@@ -23,7 +23,16 @@ fn default_config_end_to_end() {
     assert_eq!(panels.len(), 6, "default config should have 6 panels");
 
     // Each panel has required fields and known type
-    let known_types = ["cpu", "memory", "network", "temps", "disk", "processes"];
+    let known_types = [
+        "cpu",
+        "memory",
+        "network",
+        "temps",
+        "disk",
+        "processes",
+        "packages",
+        "services",
+    ];
     for panel in panels {
         let panel = panel.as_table().unwrap();
         assert!(panel.contains_key("row"));
@@ -54,5 +63,58 @@ fn default_config_end_to_end() {
     assert!(
         tick_rate > 0 && tick_rate < 10000,
         "tick_rate should be reasonable"
+    );
+}
+
+#[test]
+fn packages_widget_component_compliance() {
+    use mise_tui::component::Component;
+    let w = mise_tui::widgets::PackagesWidget::new("packages".into(), None).unwrap();
+    assert_eq!(w.id(), "packages");
+    assert_eq!(w.widget_type(), "packages");
+    assert!(!w.supports_interact());
+}
+
+#[test]
+fn services_widget_component_compliance() {
+    use mise_tui::component::Component;
+    let config: toml::Value = toml::from_str(r#"services = ["sshd"]"#).unwrap();
+    let w = mise_tui::widgets::ServicesWidget::new("services".into(), Some(config)).unwrap();
+    assert_eq!(w.id(), "services");
+    assert_eq!(w.widget_type(), "services");
+    assert!(!w.supports_interact());
+}
+
+#[test]
+fn config_with_external_widgets_validates() {
+    let toml_str = r#"
+[general]
+tick_rate = 250
+
+[layout]
+columns = 2
+rows = 1
+
+[[layout.panels]]
+row = 0
+col = 0
+type = "packages"
+
+[[layout.panels]]
+row = 0
+col = 1
+type = "services"
+
+[theme]
+
+[widgets.services]
+services = ["sshd", "NetworkManager"]
+"#;
+    let config: mise_tui::config::Config = toml::from_str(toml_str).expect("should parse");
+    let validation = config.validate(mise_tui::registry::is_known_type);
+    assert!(
+        !validation.has_errors(),
+        "validation errors: {:?}",
+        validation.errors
     );
 }

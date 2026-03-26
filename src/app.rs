@@ -18,11 +18,18 @@ use tokio_util::sync::CancellationToken;
 use crate::action::Direction;
 use crate::component::Component;
 use crate::config::Config;
-use crate::data::{DataUpdate, spawn_sysinfo_task};
+use crate::data::{DataUpdate, spawn_packages_task, spawn_services_task, spawn_sysinfo_task};
 use crate::event::{Event, EventHandler};
 use crate::layout::LayoutEngine;
 use crate::registry;
 use crate::theme::Theme;
+
+struct ExternalTaskHandle {
+    #[allow(dead_code)]
+    instance_id: String,
+    cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
 
 pub struct App {
     should_quit: bool,
@@ -48,6 +55,8 @@ pub struct App {
     show_help: bool,
     interact_mode: bool,
     undersized_panels: HashSet<String>,
+    external_handles: Vec<ExternalTaskHandle>,
+    external_disconnected: bool,
 }
 
 impl App {
@@ -104,6 +113,8 @@ impl App {
             show_help: false,
             interact_mode: false,
             undersized_panels: HashSet::new(),
+            external_handles: Vec::new(),
+            external_disconnected: false,
         })
     }
 
@@ -140,6 +151,11 @@ impl App {
                 );
             }
         }
+
+        // Spawn external tasks (packages, services) with separate channel
+        let (external_tx, mut external_rx) = mpsc::channel::<DataUpdate>(16);
+        self.spawn_external_tasks(&external_tx);
+        drop(external_tx); // only cloned senders remain — channel closes when all tasks finish
 
         let loop_result: Result<()> = async {
             while !self.should_quit {
@@ -255,13 +271,42 @@ impl App {
                         self.set_notification("Data source reconnected".to_string());
                     }
                     _ = config_rx.recv() => {
-                        self.reload_config(&mut data_rx);
+                        self.reload_config(&mut data_rx, &mut external_rx);
+                    }
+                    result = external_rx.recv(), if !self.external_disconnected => {
+                        match result {
+                            Some(update) => {
+                                let ids: Vec<String> = self.components.keys().cloned().collect();
+                                for id in &ids {
+                                    if let Some(component) = self.components.get_mut(id) {
+                                        match component.handle_data(&update) {
+                                            Ok(action) => {
+                                                if update.matches_widget_type(component.widget_type()) {
+                                                    self.error_states.remove(id);
+                                                }
+                                                if let Some(a) = action { self.handle_action(a); }
+                                            }
+                                            Err(e) => { self.error_states.insert(id.clone(), e.to_string()); }
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                self.external_disconnected = true;
+                            }
+                        }
                     }
                 }
             }
             Ok(())
         }
         .await;
+
+        // Shutdown external tasks
+        for handle in self.external_handles.drain(..) {
+            handle.cancel.cancel();
+            handle.handle.abort();
+        }
 
         // Always shutdown sysinfo task, even on error
         self.cancel.cancel();
@@ -380,7 +425,11 @@ impl App {
         self.notification = Some((msg, std::time::Instant::now()));
     }
 
-    fn reload_config(&mut self, data_rx: &mut mpsc::Receiver<DataUpdate>) {
+    fn reload_config(
+        &mut self,
+        data_rx: &mut mpsc::Receiver<DataUpdate>,
+        external_rx: &mut mpsc::Receiver<DataUpdate>,
+    ) {
         // 1. Load and validate
         let new_config = match crate::config::Config::load(Some(&self.config_path)) {
             Ok(c) => c,
@@ -493,12 +542,72 @@ impl App {
         self.sysinfo_restarting = false;
         self.sysinfo_disconnected = false;
 
+        // Cancel and clear external tasks
+        for handle in self.external_handles.drain(..) {
+            handle.cancel.cancel();
+            handle.handle.abort();
+        }
+
+        // Spawn fresh external tasks
+        let (new_external_tx, new_external_rx) = mpsc::channel::<DataUpdate>(16);
+        self.spawn_external_tasks(&new_external_tx);
+        drop(new_external_tx);
+        *external_rx = new_external_rx;
+        self.external_disconnected = false;
+
         if tick_rate_changed {
             self.set_notification(
                 "Config reloaded (tick_rate change requires restart)".to_string(),
             );
         } else {
             self.set_notification("Config reloaded".to_string());
+        }
+    }
+
+    fn spawn_external_tasks(&mut self, external_tx: &mpsc::Sender<DataUpdate>) {
+        for (id, component) in &self.components {
+            let task_cancel = self.cancel.child_token();
+            match component.widget_type() {
+                "packages" => {
+                    let widget = component
+                        .as_any()
+                        .downcast_ref::<crate::widgets::PackagesWidget>()
+                        .expect("packages widget type mismatch");
+                    let handle = spawn_packages_task(
+                        id.clone(),
+                        Duration::from_secs(widget.config.interval),
+                        Duration::from_secs(widget.config.timeout),
+                        external_tx.clone(),
+                        task_cancel.clone(),
+                    );
+                    self.external_handles.push(ExternalTaskHandle {
+                        instance_id: id.clone(),
+                        cancel: task_cancel,
+                        handle,
+                    });
+                }
+                "services" => {
+                    let widget = component
+                        .as_any()
+                        .downcast_ref::<crate::widgets::ServicesWidget>()
+                        .expect("services widget type mismatch");
+                    let handle = spawn_services_task(
+                        id.clone(),
+                        widget.config.scope.clone(),
+                        widget.config.services.clone(),
+                        Duration::from_secs(widget.config.interval),
+                        Duration::from_secs(widget.config.timeout),
+                        external_tx.clone(),
+                        task_cancel.clone(),
+                    );
+                    self.external_handles.push(ExternalTaskHandle {
+                        instance_id: id.clone(),
+                        cancel: task_cancel,
+                        handle,
+                    });
+                }
+                _ => {}
+            }
         }
     }
 

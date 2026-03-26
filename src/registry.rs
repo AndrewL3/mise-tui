@@ -2,8 +2,8 @@ use color_eyre::Result;
 
 use crate::component::Component;
 use crate::widgets::{
-    CpuWidget, DiskWidget, MemoryWidget, NetworkWidget, PlaceholderWidget, ProcessWidget,
-    TempsWidget,
+    CpuWidget, DiskWidget, MemoryWidget, NetworkWidget, PackagesWidget, PlaceholderWidget,
+    ProcessWidget, ServicesWidget, TempsWidget,
 };
 
 pub type WidgetConstructor =
@@ -61,6 +61,22 @@ fn processes_constructor(
     Ok(Box::new(ProcessWidget::new(id, config)?))
 }
 
+fn packages_constructor(
+    id: String,
+    _widget_type: String,
+    config: Option<toml::Value>,
+) -> Result<Box<dyn Component>> {
+    Ok(Box::new(PackagesWidget::new(id, config)?))
+}
+
+fn services_constructor(
+    id: String,
+    _widget_type: String,
+    config: Option<toml::Value>,
+) -> Result<Box<dyn Component>> {
+    Ok(Box::new(ServicesWidget::new(id, config)?))
+}
+
 #[allow(dead_code)]
 fn placeholder_constructor(
     id: String,
@@ -88,6 +104,12 @@ static DISK_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
 static PROCESSES_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
     constructor: processes_constructor,
 };
+static PACKAGES_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
+    constructor: packages_constructor,
+};
+static SERVICES_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
+    constructor: services_constructor,
+};
 
 #[allow(dead_code)]
 static PLACEHOLDER_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
@@ -102,6 +124,8 @@ pub fn get_descriptor(widget_type: &str) -> Option<&'static WidgetDescriptor> {
         "temps" => Some(&TEMPS_DESCRIPTOR),
         "disk" => Some(&DISK_DESCRIPTOR),
         "processes" => Some(&PROCESSES_DESCRIPTOR),
+        "packages" => Some(&PACKAGES_DESCRIPTOR),
+        "services" => Some(&SERVICES_DESCRIPTOR),
         _ => None,
     }
 }

@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 ratatui = "0.30"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
 color-eyre = "0.6"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
