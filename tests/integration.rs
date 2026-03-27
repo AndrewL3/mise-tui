@@ -32,6 +32,7 @@ fn default_config_end_to_end() {
         "processes",
         "packages",
         "services",
+        "workspaces",
     ];
     for panel in panels {
         let panel = panel.as_table().unwrap();

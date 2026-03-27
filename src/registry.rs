@@ -3,7 +3,7 @@ use color_eyre::Result;
 use crate::component::Component;
 use crate::widgets::{
     CpuWidget, DiskWidget, MemoryWidget, NetworkWidget, PackagesWidget, PlaceholderWidget,
-    ProcessWidget, ServicesWidget, TempsWidget,
+    ProcessWidget, ServicesWidget, TempsWidget, WorkspacesWidget,
 };
 
 pub type WidgetConstructor =
@@ -77,6 +77,14 @@ fn services_constructor(
     Ok(Box::new(ServicesWidget::new(id, config)?))
 }
 
+fn workspaces_constructor(
+    id: String,
+    _widget_type: String,
+    config: Option<toml::Value>,
+) -> Result<Box<dyn Component>> {
+    Ok(Box::new(WorkspacesWidget::new(id, config)?))
+}
+
 #[allow(dead_code)]
 fn placeholder_constructor(
     id: String,
@@ -110,6 +118,9 @@ static PACKAGES_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
 static SERVICES_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
     constructor: services_constructor,
 };
+static WORKSPACES_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
+    constructor: workspaces_constructor,
+};
 
 #[allow(dead_code)]
 static PLACEHOLDER_DESCRIPTOR: WidgetDescriptor = WidgetDescriptor {
@@ -126,6 +137,7 @@ pub fn get_descriptor(widget_type: &str) -> Option<&'static WidgetDescriptor> {
         "processes" => Some(&PROCESSES_DESCRIPTOR),
         "packages" => Some(&PACKAGES_DESCRIPTOR),
         "services" => Some(&SERVICES_DESCRIPTOR),
+        "workspaces" => Some(&WORKSPACES_DESCRIPTOR),
         _ => None,
     }
 }

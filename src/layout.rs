@@ -14,6 +14,8 @@ pub struct LayoutEngine {
     header: bool,
     footer: bool,
     occupancy: HashMap<(usize, usize), String>, // (row, col) -> instance_id
+    anchors: HashMap<String, (usize, usize)>,   // instance_id -> anchor cell
+    spans: HashMap<String, (usize, usize)>,     // instance_id -> (row_span, col_span)
     row_constraints: Vec<Constraint>,
     col_constraints: Vec<Constraint>,
 }
@@ -28,13 +30,25 @@ impl LayoutEngine {
         let rows = config.rows;
         let cols = config.columns;
 
-        // Build occupancy map
         let mut occupancy: HashMap<(usize, usize), String> = HashMap::new();
+        let mut anchors: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut spans: HashMap<String, (usize, usize)> = HashMap::new();
+
         for panel in &config.panels {
-            occupancy.insert((panel.row, panel.col), panel.instance_id().to_string());
+            let id = panel.instance_id().to_string();
+            let row_span = panel.row_span;
+            let col_span = panel.col_span;
+
+            anchors.insert(id.clone(), (panel.row, panel.col));
+            spans.insert(id.clone(), (row_span, col_span));
+
+            for r in panel.row..(panel.row + row_span).min(rows) {
+                for c in panel.col..(panel.col + col_span).min(cols) {
+                    occupancy.insert((r, c), id.clone());
+                }
+            }
         }
 
-        // Resolve row constraints
         let row_constraints = resolve_constraints(rows, config.row_heights.as_deref())?;
         let col_constraints = resolve_constraints(cols, config.column_widths.as_deref())?;
 
@@ -44,6 +58,8 @@ impl LayoutEngine {
             header: config.header,
             footer: config.footer,
             occupancy,
+            anchors,
+            spans,
             row_constraints,
             col_constraints,
         })
@@ -79,23 +95,37 @@ impl LayoutEngine {
     }
 
     /// Resolve the terminal area into a map of `(row, col)` -> `Rect` for
-    /// every occupied cell. Only occupied cells are included.
+    /// every panel, keyed by its anchor cell. Spanning panels produce a single
+    /// merged `Rect` covering all their constituent cells.
     pub fn resolve_rects(&self, area: Rect) -> HashMap<(usize, usize), Rect> {
-        let (_header, grid_area, _footer) = self.split_chrome(area);
-
-        // Split grid area into row bands
-        let row_areas = Layout::vertical(&self.row_constraints).split(grid_area);
+        let all_cells = self.resolve_all_rects(area);
 
         let mut result = HashMap::new();
 
-        for row in 0..self.rows {
-            let row_rect = row_areas[row];
-            let col_areas = Layout::horizontal(&self.col_constraints).split(row_rect);
+        for (id, &(anchor_row, anchor_col)) in &self.anchors {
+            let &(row_span, col_span) = self.spans.get(id).unwrap();
 
-            for col in 0..self.cols {
-                if self.occupancy.contains_key(&(row, col)) {
-                    result.insert((row, col), col_areas[col]);
+            let mut min_x = u16::MAX;
+            let mut min_y = u16::MAX;
+            let mut max_x: u16 = 0;
+            let mut max_y: u16 = 0;
+
+            for r in anchor_row..(anchor_row + row_span).min(self.rows) {
+                for c in anchor_col..(anchor_col + col_span).min(self.cols) {
+                    if let Some(cell) = all_cells.get(&(r, c)) {
+                        min_x = min_x.min(cell.x);
+                        min_y = min_y.min(cell.y);
+                        max_x = max_x.max(cell.x + cell.width);
+                        max_y = max_y.max(cell.y + cell.height);
+                    }
                 }
+            }
+
+            if min_x < max_x && min_y < max_y {
+                result.insert(
+                    (anchor_row, anchor_col),
+                    Rect::new(min_x, min_y, max_x - min_x, max_y - min_y),
+                );
             }
         }
 
@@ -129,10 +159,18 @@ impl LayoutEngine {
     }
 
     /// Return all occupied cells, sorted by `(row, col)`.
+    /// Returns anchor cells only (not secondary cells of spanning panels).
     pub fn occupied_cells(&self) -> Vec<(usize, usize)> {
-        let mut cells: Vec<(usize, usize)> = self.occupancy.keys().copied().collect();
+        let mut cells: Vec<(usize, usize)> = self.anchors.values().copied().collect();
         cells.sort();
         cells
+    }
+
+    /// Given any occupied cell, return the anchor cell (top-left) of the panel
+    /// that occupies it. Returns `None` for unoccupied cells.
+    pub fn anchor_for(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let id = self.occupancy.get(&(row, col))?;
+        self.anchors.get(id).copied()
     }
 
     /// Return the grid dimensions as `(rows, cols)`.
@@ -214,6 +252,25 @@ mod tests {
             col,
             widget_type: widget_type.to_string(),
             id: None,
+            col_span: 1,
+            row_span: 1,
+        }
+    }
+
+    fn spanning_panel(
+        row: usize,
+        col: usize,
+        widget_type: &str,
+        row_span: usize,
+        col_span: usize,
+    ) -> PanelConfig {
+        PanelConfig {
+            row,
+            col,
+            widget_type: widget_type.to_string(),
+            id: None,
+            col_span,
+            row_span,
         }
     }
 
@@ -315,5 +372,79 @@ mod tests {
         assert!(footer.is_some());
         assert_eq!(footer.unwrap().height, 1);
         assert_eq!(grid.height, 22);
+    }
+
+    #[test]
+    fn spanning_occupancy_fills_all_cells() {
+        let config = make_config(
+            2,
+            3,
+            vec![spanning_panel(0, 0, "cpu", 2, 2), panel(0, 2, "memory")],
+        );
+        let engine = LayoutEngine::from_config(&config).unwrap();
+        assert_eq!(engine.instance_at(0, 0), Some("cpu"));
+        assert_eq!(engine.instance_at(0, 1), Some("cpu"));
+        assert_eq!(engine.instance_at(1, 0), Some("cpu"));
+        assert_eq!(engine.instance_at(1, 1), Some("cpu"));
+        assert_eq!(engine.instance_at(0, 2), Some("memory"));
+        assert_eq!(engine.instance_at(1, 2), None);
+    }
+
+    #[test]
+    fn occupied_cells_returns_anchors_only() {
+        let config = make_config(
+            2,
+            3,
+            vec![spanning_panel(0, 0, "cpu", 2, 2), panel(0, 2, "memory")],
+        );
+        let engine = LayoutEngine::from_config(&config).unwrap();
+        assert_eq!(engine.occupied_cells(), vec![(0, 0), (0, 2)]);
+    }
+
+    #[test]
+    fn anchor_for_returns_anchor_cell() {
+        let config = make_config(
+            2,
+            3,
+            vec![spanning_panel(0, 0, "cpu", 2, 2), panel(0, 2, "memory")],
+        );
+        let engine = LayoutEngine::from_config(&config).unwrap();
+        assert_eq!(engine.anchor_for(0, 0), Some((0, 0)));
+        assert_eq!(engine.anchor_for(1, 1), Some((0, 0)));
+        assert_eq!(engine.anchor_for(0, 2), Some((0, 2)));
+        assert_eq!(engine.anchor_for(1, 2), None);
+    }
+
+    #[test]
+    fn resolve_rects_merges_spanning_cells() {
+        let config = make_config(
+            2,
+            2,
+            vec![
+                spanning_panel(0, 0, "cpu", 1, 2),
+                panel(1, 0, "memory"),
+                panel(1, 1, "network"),
+            ],
+        );
+        let engine = LayoutEngine::from_config(&config).unwrap();
+        let rects = engine.resolve_rects(Rect::new(0, 0, 100, 50));
+        assert_eq!(rects.len(), 3);
+        let cpu_rect = rects[&(0, 0)];
+        let mem_rect = rects[&(1, 0)];
+        assert_eq!(cpu_rect.width, 100);
+        assert!(cpu_rect.width > mem_rect.width);
+    }
+
+    #[test]
+    fn resolve_rects_2x2_span() {
+        let config = make_config(2, 2, vec![spanning_panel(0, 0, "cpu", 2, 2)]);
+        let engine = LayoutEngine::from_config(&config).unwrap();
+        let rects = engine.resolve_rects(Rect::new(0, 0, 100, 50));
+        assert_eq!(rects.len(), 1);
+        let rect = rects[&(0, 0)];
+        assert_eq!(rect.x, 0);
+        assert_eq!(rect.y, 0);
+        assert_eq!(rect.width, 100);
+        assert_eq!(rect.height, 50);
     }
 }

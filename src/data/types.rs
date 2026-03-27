@@ -8,6 +8,7 @@ pub enum DataUpdate {
     Process(ProcessData),
     Packages(PackagesResult),
     Services(ServicesResult),
+    Hyprland(HyprlandData),
 }
 
 impl DataUpdate {
@@ -23,6 +24,7 @@ impl DataUpdate {
                 | (DataUpdate::Process(_), "processes")
                 | (DataUpdate::Packages(_), "packages")
                 | (DataUpdate::Services(_), "services")
+                | (DataUpdate::Hyprland(_), "workspaces")
         )
     }
 }
@@ -164,6 +166,33 @@ pub enum ActiveState {
     Other(String),
 }
 
+pub type WorkspaceId = i32;
+
+#[derive(Debug, Clone)]
+pub struct HyprlandData {
+    pub monitors: Vec<MonitorInfo>,
+    pub workspaces: Vec<WorkspaceInfo>,
+    pub active_workspace: Option<WorkspaceId>,
+    pub active_window: Option<String>,
+    pub connected: bool,
+    pub detected: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    pub id: i32,
+    pub name: String,
+    pub active_workspace_id: WorkspaceId,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceInfo {
+    pub id: WorkspaceId,
+    pub name: String,
+    pub monitor: String,
+    pub window_count: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,8 +288,16 @@ mod tests {
                 instance_id: "services".to_string(),
                 data: Ok(ServicesData { services: vec![] }),
             }),
+            DataUpdate::Hyprland(HyprlandData {
+                monitors: vec![],
+                workspaces: vec![],
+                active_workspace: None,
+                active_window: None,
+                connected: false,
+                detected: false,
+            }),
         ];
-        assert_eq!(updates.len(), 8);
+        assert_eq!(updates.len(), 9);
     }
 
     #[test]
@@ -408,5 +445,43 @@ mod tests {
         });
         assert!(update.matches_widget_type("services"));
         assert!(!update.matches_widget_type("memory"));
+    }
+
+    #[test]
+    fn hyprland_data_stores_state() {
+        let data = HyprlandData {
+            monitors: vec![MonitorInfo {
+                id: 0,
+                name: "DP-1".to_string(),
+                active_workspace_id: 1,
+            }],
+            workspaces: vec![WorkspaceInfo {
+                id: 1,
+                name: "1".to_string(),
+                monitor: "DP-1".to_string(),
+                window_count: 3,
+            }],
+            active_workspace: Some(1),
+            active_window: Some("Firefox".to_string()),
+            connected: true,
+            detected: true,
+        };
+        assert_eq!(data.monitors.len(), 1);
+        assert_eq!(data.workspaces[0].window_count, 3);
+        assert!(data.connected);
+    }
+
+    #[test]
+    fn matches_widget_type_workspaces() {
+        let update = DataUpdate::Hyprland(HyprlandData {
+            monitors: vec![],
+            workspaces: vec![],
+            active_workspace: None,
+            active_window: None,
+            connected: false,
+            detected: false,
+        });
+        assert!(update.matches_widget_type("workspaces"));
+        assert!(!update.matches_widget_type("cpu"));
     }
 }

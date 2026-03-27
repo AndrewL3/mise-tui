@@ -14,6 +14,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_one() -> usize {
+    1
+}
+
 // ─── Config structs ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +60,10 @@ pub struct PanelConfig {
     #[serde(rename = "type")]
     pub widget_type: String,
     pub id: Option<String>,
+    #[serde(default = "default_one")]
+    pub col_span: usize,
+    #[serde(default = "default_one")]
+    pub row_span: usize,
 }
 
 impl PanelConfig {
@@ -71,16 +79,37 @@ pub enum ConfigError {
     #[error("invalid grid dimensions: rows={rows}, columns={columns} (both must be > 0)")]
     InvalidGridDimensions { rows: usize, columns: usize },
 
-    #[error("panel at ({row}, {col}) is out of bounds for {rows}x{cols} grid")]
-    PanelOutOfBounds {
+    #[error(
+        "panel '{id}' at ({row}, {col}) has invalid span: col_span={col_span}, row_span={row_span} (both must be >= 1)"
+    )]
+    InvalidSpan {
+        id: String,
         row: usize,
         col: usize,
+        col_span: usize,
+        row_span: usize,
+    },
+
+    #[error(
+        "panel '{id}' at ({row}, {col}) with span {col_span}x{row_span} exceeds {rows}x{cols} grid"
+    )]
+    SpanOutOfBounds {
+        id: String,
+        row: usize,
+        col: usize,
+        col_span: usize,
+        row_span: usize,
         rows: usize,
         cols: usize,
     },
 
-    #[error("duplicate panel at ({row}, {col})")]
-    DuplicatePosition { row: usize, col: usize },
+    #[error("panels '{id1}' and '{id2}' overlap at cell ({overlap_row}, {overlap_col})")]
+    SpanOverlap {
+        id1: String,
+        id2: String,
+        overlap_row: usize,
+        overlap_col: usize,
+    },
 
     #[error("unknown widget type '{widget_type}'")]
     UnknownWidgetType { widget_type: String },
@@ -177,31 +206,56 @@ impl Config {
         }
 
         // ── 2. Panel-level checks ────────────────────────────────────────────
-        let mut seen_positions: HashSet<(usize, usize)> = HashSet::new();
+        let mut cell_owners: HashMap<(usize, usize), String> = HashMap::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
         let mut panel_ids: HashSet<String> = HashSet::new();
 
         for panel in &layout.panels {
-            // Out-of-bounds (only meaningful when grid is nonzero)
-            if layout.rows > 0
-                && layout.columns > 0
-                && (panel.row >= layout.rows || panel.col >= layout.columns)
-            {
-                errors.push(ConfigError::PanelOutOfBounds {
+            let id = panel.instance_id().to_string();
+            let col_span = panel.col_span;
+            let row_span = panel.row_span;
+
+            // Non-zero spans
+            if col_span == 0 || row_span == 0 {
+                errors.push(ConfigError::InvalidSpan {
+                    id: id.clone(),
                     row: panel.row,
                     col: panel.col,
+                    col_span,
+                    row_span,
+                });
+            }
+
+            // Bounds check (span must fit within grid)
+            if layout.rows > 0
+                && layout.columns > 0
+                && (panel.row + row_span > layout.rows || panel.col + col_span > layout.columns)
+            {
+                errors.push(ConfigError::SpanOutOfBounds {
+                    id: id.clone(),
+                    row: panel.row,
+                    col: panel.col,
+                    col_span,
+                    row_span,
                     rows: layout.rows,
                     cols: layout.columns,
                 });
             }
 
-            // Duplicate position
-            let pos = (panel.row, panel.col);
-            if !seen_positions.insert(pos) {
-                errors.push(ConfigError::DuplicatePosition {
-                    row: panel.row,
-                    col: panel.col,
-                });
+            // Overlap detection: claim all cells in the span
+            for r in panel.row..(panel.row + row_span).min(layout.rows) {
+                for c in panel.col..(panel.col + col_span).min(layout.columns) {
+                    if let Some(existing) = cell_owners.get(&(r, c)) {
+                        errors.push(ConfigError::SpanOverlap {
+                            id1: existing.clone(),
+                            id2: id.clone(),
+                            overlap_row: r,
+                            overlap_col: c,
+                        });
+                    } else {
+                        cell_owners.insert((r, c), id.clone());
+                    }
+                }
             }
 
             // Unknown widget type
@@ -212,17 +266,16 @@ impl Config {
             }
 
             // Instance ID validation (format)
-            let id = panel.instance_id();
-            if !is_valid_instance_id(id) {
-                errors.push(ConfigError::InvalidInstanceId { id: id.to_string() });
+            if !is_valid_instance_id(&id) {
+                errors.push(ConfigError::InvalidInstanceId { id: id.clone() });
             }
 
             // Duplicate instance ID
-            if !seen_ids.insert(id.to_string()) {
-                errors.push(ConfigError::DuplicateInstanceId { id: id.to_string() });
+            if !seen_ids.insert(id.clone()) {
+                errors.push(ConfigError::DuplicateInstanceId { id: id.clone() });
             }
 
-            panel_ids.insert(id.to_string());
+            panel_ids.insert(id);
         }
 
         // ── 3. Empty panels warning ──────────────────────────────────────────
@@ -414,10 +467,50 @@ mod tests {
             row = 0
             col = 0
             type = "cpu"
-            col_span = 2
+            bogus_field = 2
             [theme]
         "#;
         assert!(Config::parse(toml).is_err());
+    }
+
+    #[test]
+    fn parse_panel_with_spans() {
+        let toml = r#"
+            [general]
+            tick_rate = 250
+            [layout]
+            columns = 3
+            rows = 2
+            [[layout.panels]]
+            row = 0
+            col = 0
+            type = "cpu"
+            col_span = 2
+            row_span = 2
+            [theme]
+        "#;
+        let config = Config::parse(toml).unwrap();
+        assert_eq!(config.layout.panels[0].col_span, 2);
+        assert_eq!(config.layout.panels[0].row_span, 2);
+    }
+
+    #[test]
+    fn parse_panel_spans_default_to_one() {
+        let toml = r#"
+            [general]
+            tick_rate = 250
+            [layout]
+            columns = 1
+            rows = 1
+            [[layout.panels]]
+            row = 0
+            col = 0
+            type = "cpu"
+            [theme]
+        "#;
+        let config = Config::parse(toml).unwrap();
+        assert_eq!(config.layout.panels[0].col_span, 1);
+        assert_eq!(config.layout.panels[0].row_span, 1);
     }
 
     #[test]
@@ -459,7 +552,15 @@ mod tests {
     fn known_type(t: &str) -> bool {
         matches!(
             t,
-            "cpu" | "memory" | "network" | "temps" | "disk" | "processes"
+            "cpu"
+                | "memory"
+                | "network"
+                | "temps"
+                | "disk"
+                | "processes"
+                | "packages"
+                | "services"
+                | "workspaces"
         )
     }
 
@@ -511,7 +612,7 @@ mod tests {
             result
                 .errors
                 .iter()
-                .any(|e| matches!(e, ConfigError::PanelOutOfBounds { .. }))
+                .any(|e| matches!(e, ConfigError::SpanOutOfBounds { .. }))
         );
     }
 
@@ -539,7 +640,7 @@ mod tests {
             result
                 .errors
                 .iter()
-                .any(|e| matches!(e, ConfigError::DuplicatePosition { .. }))
+                .any(|e| matches!(e, ConfigError::SpanOverlap { .. }))
         );
     }
 
@@ -762,5 +863,113 @@ mod tests {
                 .iter()
                 .any(|w| matches!(w, ConfigWarning::EmptyPanels))
         );
+    }
+
+    #[test]
+    fn validate_span_zero_errors() {
+        let toml = r#"
+            [general]
+            tick_rate = 250
+            [layout]
+            columns = 2
+            rows = 2
+            [[layout.panels]]
+            row = 0
+            col = 0
+            type = "cpu"
+            col_span = 0
+            [theme]
+        "#;
+        let config = Config::parse(toml).unwrap();
+        let result = config.validate(known_type);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidSpan { .. }))
+        );
+    }
+
+    #[test]
+    fn validate_span_out_of_bounds_errors() {
+        let toml = r#"
+            [general]
+            tick_rate = 250
+            [layout]
+            columns = 2
+            rows = 2
+            [[layout.panels]]
+            row = 0
+            col = 0
+            type = "cpu"
+            col_span = 3
+            [theme]
+        "#;
+        let config = Config::parse(toml).unwrap();
+        let result = config.validate(known_type);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::SpanOutOfBounds { .. }))
+        );
+    }
+
+    #[test]
+    fn validate_span_overlap_errors() {
+        let toml = r#"
+            [general]
+            tick_rate = 250
+            [layout]
+            columns = 3
+            rows = 1
+            [[layout.panels]]
+            row = 0
+            col = 0
+            type = "cpu"
+            col_span = 2
+            [[layout.panels]]
+            row = 0
+            col = 1
+            type = "memory"
+            [theme]
+        "#;
+        let config = Config::parse(toml).unwrap();
+        let result = config.validate(known_type);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::SpanOverlap { .. }))
+        );
+    }
+
+    #[test]
+    fn validate_span_valid_no_errors() {
+        let toml = r#"
+            [general]
+            tick_rate = 250
+            [layout]
+            columns = 3
+            rows = 2
+            [[layout.panels]]
+            row = 0
+            col = 0
+            type = "cpu"
+            col_span = 2
+            [[layout.panels]]
+            row = 0
+            col = 2
+            type = "memory"
+            [[layout.panels]]
+            row = 1
+            col = 0
+            type = "network"
+            col_span = 3
+            [theme]
+        "#;
+        let config = Config::parse(toml).unwrap();
+        let result = config.validate(known_type);
+        assert!(!result.has_errors(), "errors: {:?}", result.errors);
     }
 }

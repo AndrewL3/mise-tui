@@ -8,6 +8,7 @@ pub mod processes;
 pub mod services;
 pub mod temps;
 pub mod util;
+pub mod workspaces;
 
 pub use cpu::CpuWidget;
 pub use disk::DiskWidget;
@@ -18,3 +19,4 @@ pub use placeholder::PlaceholderWidget;
 pub use processes::ProcessWidget;
 pub use services::ServicesWidget;
 pub use temps::TempsWidget;
+pub use workspaces::WorkspacesWidget;

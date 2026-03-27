@@ -18,7 +18,9 @@ use tokio_util::sync::CancellationToken;
 use crate::action::Direction;
 use crate::component::Component;
 use crate::config::Config;
-use crate::data::{DataUpdate, spawn_packages_task, spawn_services_task, spawn_sysinfo_task};
+use crate::data::{
+    DataUpdate, spawn_hyprland_task, spawn_packages_task, spawn_services_task, spawn_sysinfo_task,
+};
 use crate::event::{Event, EventHandler};
 use crate::layout::LayoutEngine;
 use crate::registry;
@@ -57,6 +59,8 @@ pub struct App {
     undersized_panels: HashSet<String>,
     external_handles: Vec<ExternalTaskHandle>,
     external_disconnected: bool,
+    hyprland_handle: Option<ExternalTaskHandle>,
+    hyprland_disconnected: bool,
 }
 
 impl App {
@@ -115,6 +119,8 @@ impl App {
             undersized_panels: HashSet::new(),
             external_handles: Vec::new(),
             external_disconnected: false,
+            hyprland_handle: None,
+            hyprland_disconnected: false,
         })
     }
 
@@ -156,6 +162,23 @@ impl App {
         let (external_tx, mut external_rx) = mpsc::channel::<DataUpdate>(16);
         self.spawn_external_tasks(&external_tx);
         drop(external_tx); // only cloned senders remain — channel closes when all tasks finish
+
+        // Spawn Hyprland task if workspaces widget exists
+        let (hyprland_tx, mut hyprland_rx) = mpsc::channel::<DataUpdate>(16);
+        let has_workspaces = self
+            .components
+            .values()
+            .any(|c| c.widget_type() == "workspaces");
+        if has_workspaces {
+            let hyprland_cancel = self.cancel.child_token();
+            let handle = spawn_hyprland_task(hyprland_tx.clone(), hyprland_cancel.clone());
+            self.hyprland_handle = Some(ExternalTaskHandle {
+                instance_id: "workspaces".to_string(),
+                cancel: hyprland_cancel,
+                handle,
+            });
+        }
+        drop(hyprland_tx);
 
         let loop_result: Result<()> = async {
             while !self.should_quit {
@@ -271,7 +294,7 @@ impl App {
                         self.set_notification("Data source reconnected".to_string());
                     }
                     _ = config_rx.recv() => {
-                        self.reload_config(&mut data_rx, &mut external_rx);
+                        self.reload_config(&mut data_rx, &mut external_rx, &mut hyprland_rx);
                     }
                     result = external_rx.recv(), if !self.external_disconnected => {
                         match result {
@@ -296,6 +319,29 @@ impl App {
                             }
                         }
                     }
+                    result = hyprland_rx.recv(), if !self.hyprland_disconnected => {
+                        match result {
+                            Some(update) => {
+                                let ids: Vec<String> = self.components.keys().cloned().collect();
+                                for id in &ids {
+                                    if let Some(component) = self.components.get_mut(id) {
+                                        match component.handle_data(&update) {
+                                            Ok(action) => {
+                                                if update.matches_widget_type(component.widget_type()) {
+                                                    self.error_states.remove(id);
+                                                }
+                                                if let Some(a) = action { self.handle_action(a); }
+                                            }
+                                            Err(e) => { self.error_states.insert(id.clone(), e.to_string()); }
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                self.hyprland_disconnected = true;
+                            }
+                        }
+                    }
                 }
             }
             Ok(())
@@ -304,6 +350,12 @@ impl App {
 
         // Shutdown external tasks
         for handle in self.external_handles.drain(..) {
+            handle.cancel.cancel();
+            handle.handle.abort();
+        }
+
+        // Shutdown Hyprland task
+        if let Some(handle) = self.hyprland_handle.take() {
             handle.cancel.cancel();
             handle.handle.abort();
         }
@@ -429,6 +481,7 @@ impl App {
         &mut self,
         data_rx: &mut mpsc::Receiver<DataUpdate>,
         external_rx: &mut mpsc::Receiver<DataUpdate>,
+        hyprland_rx: &mut mpsc::Receiver<DataUpdate>,
     ) {
         // 1. Load and validate
         let new_config = match crate::config::Config::load(Some(&self.config_path)) {
@@ -518,7 +571,9 @@ impl App {
         // Recompute focus
         let occupied = self.layout.occupied_cells();
         if let Some(current) = self.focus {
-            if self.layout.instance_at(current.0, current.1).is_none() {
+            if let Some(anchor) = self.layout.anchor_for(current.0, current.1) {
+                self.focus = Some(anchor);
+            } else {
                 self.focus = occupied.first().copied();
             }
         } else {
@@ -554,6 +609,30 @@ impl App {
         drop(new_external_tx);
         *external_rx = new_external_rx;
         self.external_disconnected = false;
+
+        // Cancel and restart Hyprland task
+        if let Some(handle) = self.hyprland_handle.take() {
+            handle.cancel.cancel();
+            handle.handle.abort();
+        }
+
+        let (new_hyprland_tx, new_hyprland_rx) = mpsc::channel::<DataUpdate>(16);
+        let has_workspaces = self
+            .components
+            .values()
+            .any(|c| c.widget_type() == "workspaces");
+        if has_workspaces {
+            let hyprland_cancel = self.cancel.child_token();
+            let handle = spawn_hyprland_task(new_hyprland_tx.clone(), hyprland_cancel.clone());
+            self.hyprland_handle = Some(ExternalTaskHandle {
+                instance_id: "workspaces".to_string(),
+                cancel: hyprland_cancel,
+                handle,
+            });
+        }
+        drop(new_hyprland_tx);
+        *hyprland_rx = new_hyprland_rx;
+        self.hyprland_disconnected = false;
 
         if tick_rate_changed {
             self.set_notification(
@@ -660,35 +739,25 @@ impl App {
         let (rows, cols) = self.layout.grid_dimensions();
 
         let target = match direction {
-            Direction::Up => {
-                // Search rows above in current column (decreasing row)
-                (0..current.0)
-                    .rev()
-                    .find(|&r| self.layout.instance_at(r, current.1).is_some())
-                    .map(|r| (r, current.1))
-            }
-            Direction::Down => {
-                // Search rows below in current column (increasing row)
-                ((current.0 + 1)..rows)
-                    .find(|&r| self.layout.instance_at(r, current.1).is_some())
-                    .map(|r| (r, current.1))
-            }
-            Direction::Left => {
-                // Search cols left in current row (decreasing col)
-                (0..current.1)
-                    .rev()
-                    .find(|&c| self.layout.instance_at(current.0, c).is_some())
-                    .map(|c| (current.0, c))
-            }
-            Direction::Right => {
-                // Search cols right in current row (increasing col)
-                ((current.1 + 1)..cols)
-                    .find(|&c| self.layout.instance_at(current.0, c).is_some())
-                    .map(|c| (current.0, c))
-            }
+            Direction::Up => (0..current.0)
+                .rev()
+                .find(|&r| self.layout.instance_at(r, current.1).is_some())
+                .and_then(|r| self.layout.anchor_for(r, current.1)),
+            Direction::Down => ((current.0 + 1)..rows)
+                .find(|&r| self.layout.instance_at(r, current.1).is_some())
+                .and_then(|r| self.layout.anchor_for(r, current.1)),
+            Direction::Left => (0..current.1)
+                .rev()
+                .find(|&c| self.layout.instance_at(current.0, c).is_some())
+                .and_then(|c| self.layout.anchor_for(current.0, c)),
+            Direction::Right => ((current.1 + 1)..cols)
+                .find(|&c| self.layout.instance_at(current.0, c).is_some())
+                .and_then(|c| self.layout.anchor_for(current.0, c)),
         };
 
-        if let Some(t) = target {
+        if let Some(t) = target
+            && t != current
+        {
             self.focus = Some(t);
         }
     }
@@ -717,67 +786,73 @@ impl App {
 
             // Render grid cells
             self.undersized_panels.clear();
+            let panel_rects = self.layout.resolve_rects(area);
             let all_rects = self.layout.resolve_all_rects(area);
             let (rows, cols) = self.layout.grid_dimensions();
 
+            // 1. Draw empty borders for unoccupied cells
             for row in 0..rows {
                 for col in 0..cols {
-                    let cell_rect = match all_rects.get(&(row, col)) {
-                        Some(r) => *r,
-                        None => continue,
-                    };
-
-                    let is_focused = self.focus == Some((row, col));
-                    let border_style = if is_focused && self.interact_mode {
-                        self.theme.border_interact
-                    } else if is_focused {
-                        self.theme.border_focused
-                    } else {
-                        self.theme.border
-                    };
-
-                    let instance_id = self.layout.instance_at(row, col);
-
-                    let block = if let Some(id) = instance_id {
-                        let name = self
-                            .components
-                            .get(id)
-                            .map(|c| c.name().to_string())
-                            .unwrap_or_default();
-                        Block::bordered()
-                            .title(format!(" {} ", name))
-                            .title_style(self.theme.title)
-                            .border_style(border_style)
-                    } else {
-                        Block::bordered().border_style(border_style)
-                    };
-
-                    let inner = block.inner(cell_rect);
-                    frame.render_widget(block, cell_rect);
-
-                    // Render component content in the inner area
-                    if let Some(id) = instance_id
-                        && let Some(component) = self.components.get_mut(id)
+                    if self.layout.instance_at(row, col).is_none()
+                        && let Some(&cell_rect) = all_rects.get(&(row, col))
                     {
-                        if let Some(error_msg) = self.error_states.get(id) {
-                            let error_style = Style::new().fg(self.theme.error_fg);
-                            let error_text =
-                                Paragraph::new(Line::from(ratatui::text::Span::styled(
-                                    format!("Error: {error_msg}"),
-                                    error_style,
-                                )));
-                            frame.render_widget(error_text, inner);
+                        let block = Block::bordered().border_style(self.theme.border);
+                        frame.render_widget(block, cell_rect);
+                    }
+                }
+            }
+
+            // 2. Draw panels at anchor rects
+            for (&(row, col), &cell_rect) in &panel_rects {
+                let is_focused = self.focus == Some((row, col));
+                let border_style = if is_focused && self.interact_mode {
+                    self.theme.border_interact
+                } else if is_focused {
+                    self.theme.border_focused
+                } else {
+                    self.theme.border
+                };
+
+                let instance_id = self.layout.instance_at(row, col);
+
+                let block = if let Some(id) = instance_id {
+                    let name = self
+                        .components
+                        .get(id)
+                        .map(|c| c.name().to_string())
+                        .unwrap_or_default();
+                    Block::bordered()
+                        .title(format!(" {} ", name))
+                        .title_style(self.theme.title)
+                        .border_style(border_style)
+                } else {
+                    Block::bordered().border_style(border_style)
+                };
+
+                let inner = block.inner(cell_rect);
+                frame.render_widget(block, cell_rect);
+
+                // Render component content in the inner area
+                if let Some(id) = instance_id
+                    && let Some(component) = self.components.get_mut(id)
+                {
+                    if let Some(error_msg) = self.error_states.get(id) {
+                        let error_style = Style::new().fg(self.theme.error_fg);
+                        let error_text = Paragraph::new(Line::from(ratatui::text::Span::styled(
+                            format!("Error: {error_msg}"),
+                            error_style,
+                        )));
+                        frame.render_widget(error_text, inner);
+                    } else {
+                        let (min_w, min_h) = component.min_size();
+                        if inner.width < min_w || inner.height < min_h {
+                            self.undersized_panels.insert(id.to_string());
+                            let placeholder =
+                                Paragraph::new(Line::from(component.name().to_string()))
+                                    .alignment(ratatui::layout::Alignment::Center);
+                            frame.render_widget(placeholder, inner);
                         } else {
-                            let (min_w, min_h) = component.min_size();
-                            if inner.width < min_w || inner.height < min_h {
-                                self.undersized_panels.insert(id.to_string());
-                                let placeholder =
-                                    Paragraph::new(Line::from(component.name().to_string()))
-                                        .alignment(ratatui::layout::Alignment::Center);
-                                frame.render_widget(placeholder, inner);
-                            } else {
-                                component.draw(frame, inner, &self.theme);
-                            }
+                            component.draw(frame, inner, &self.theme);
                         }
                     }
                 }
