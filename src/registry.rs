@@ -145,3 +145,12 @@ pub fn get_descriptor(widget_type: &str) -> Option<&'static WidgetDescriptor> {
 pub fn is_known_type(widget_type: &str) -> bool {
     get_descriptor(widget_type).is_some()
 }
+
+pub fn known_types() -> Vec<&'static str> {
+    let mut types = vec![
+        "cpu", "disk", "memory", "network",
+        "packages", "processes", "services", "temps", "workspaces",
+    ];
+    types.sort();
+    types
+}

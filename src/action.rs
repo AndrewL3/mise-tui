@@ -1,3 +1,5 @@
+use ratatui::crossterm::event::KeyEvent;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Quit,
@@ -10,6 +12,12 @@ pub enum Action {
     Notify(String),
     EnterInteract,
     ExitInteract,
+    ToggleHelp,
+    SwitchProfile(ProfileDirection),
+    EnterEditMode,
+    ExitEditMode,
+    EditKey(KeyEvent),
+    SaveLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,4 +26,10 @@ pub enum Direction {
     Down,
     Left,
     Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileDirection {
+    Next,
+    Prev,
 }

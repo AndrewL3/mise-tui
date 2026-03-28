@@ -1,15 +1,16 @@
 use color_eyre::{Result, eyre::eyre};
 use ratatui::style::{Color, Modifier, Style};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Raw TOML-deserialized theme configuration. All fields are optional;
 /// absent fields fall back to defaults in `Theme::from_config`.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ThemeConfig {
     pub border: Option<String>,
     pub border_focused: Option<String>,
     pub border_interact: Option<String>,
+    pub border_edit: Option<String>,
     pub title: Option<String>,
     pub label: Option<String>,
     pub value: Option<String>,
@@ -31,6 +32,7 @@ pub struct Theme {
     pub border: Style,
     pub border_focused: Style,
     pub border_interact: Style,
+    pub border_edit: Style,
     pub title: Style,
     pub label: Style,
     pub value: Style,
@@ -170,6 +172,7 @@ impl Theme {
             border: resolve_style!(border),
             border_focused: resolve_style!(border_focused),
             border_interact: resolve_style!(border_interact),
+            border_edit: resolve_style!(border_edit),
             title: resolve_style!(title),
             label: resolve_style!(label),
             value: resolve_style!(value),
@@ -191,6 +194,7 @@ impl Theme {
             border: Style::new().fg(Color::Gray),
             border_focused: Style::new().fg(Color::Cyan),
             border_interact: Style::new().fg(Color::Yellow),
+            border_edit: Style::new().fg(Color::Magenta),
             title: Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
             label: Style::new().fg(Color::Gray),
             value: Style::new().fg(Color::White),
@@ -296,6 +300,7 @@ mod tests {
             border: None,
             border_focused: None,
             border_interact: None,
+            border_edit: None,
             title: None,
             label: None,
             value: None,
@@ -320,6 +325,7 @@ mod tests {
             border: Some("red".to_string()),
             border_focused: Some("bold green".to_string()),
             border_interact: None,
+            border_edit: None,
             title: None,
             label: None,
             value: None,
@@ -345,6 +351,7 @@ mod tests {
             border: Some("not_a_color".to_string()),
             border_focused: None,
             border_interact: None,
+            border_edit: None,
             title: None,
             label: None,
             value: None,

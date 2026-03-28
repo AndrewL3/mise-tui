@@ -4,7 +4,7 @@ use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use ratatui::layout::{Constraint, Layout, Rect};
 
-use crate::config::LayoutConfig;
+use crate::config::ProfileConfig;
 
 // ─── LayoutEngine ─────────────────────────────────────────────────────────────
 
@@ -21,12 +21,12 @@ pub struct LayoutEngine {
 }
 
 impl LayoutEngine {
-    /// Build the layout engine from a `LayoutConfig`.
+    /// Build the layout engine from a `ProfileConfig`.
     ///
     /// Resolves percentage constraints for rows and columns. When a sizing
     /// array is omitted, cells are split equally (last item absorbs remainder:
     /// `100 - pct * (n-1)`).
-    pub fn from_config(config: &LayoutConfig) -> Result<Self> {
+    pub fn from_config(config: &ProfileConfig) -> Result<Self> {
         let rows = config.rows;
         let cols = config.columns;
 
@@ -234,8 +234,8 @@ mod tests {
     use super::*;
     use crate::config::PanelConfig;
 
-    fn make_config(rows: usize, cols: usize, panels: Vec<PanelConfig>) -> LayoutConfig {
-        LayoutConfig {
+    fn make_config(rows: usize, cols: usize, panels: Vec<PanelConfig>) -> ProfileConfig {
+        ProfileConfig {
             rows,
             columns: cols,
             column_widths: None,
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn explicit_percentages() {
-        let config = LayoutConfig {
+        let config = ProfileConfig {
             rows: 2,
             columns: 1,
             column_widths: None,

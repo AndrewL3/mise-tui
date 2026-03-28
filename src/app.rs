@@ -7,7 +7,6 @@ use color_eyre::Result;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    crossterm::event::{KeyCode, KeyModifiers},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph},
@@ -17,14 +16,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::action::Direction;
 use crate::component::Component;
-use crate::config::Config;
+use crate::config::{Config, KeybindsConfig, NormalizedConfig};
 use crate::data::{
     DataUpdate, spawn_hyprland_task, spawn_packages_task, spawn_services_task, spawn_sysinfo_task,
 };
+use crate::editor::{EditAction, EditMode};
 use crate::event::{Event, EventHandler};
+use crate::input::{InputMode, KeyDispatcher};
 use crate::layout::LayoutEngine;
+use crate::profile::ProfileManager;
 use crate::registry;
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeConfig};
 
 struct ExternalTaskHandle {
     #[allow(dead_code)]
@@ -61,18 +63,27 @@ pub struct App {
     external_disconnected: bool,
     hyprland_handle: Option<ExternalTaskHandle>,
     hyprland_disconnected: bool,
+    profile_manager: ProfileManager,
+    widget_configs: HashMap<String, toml::Value>,
+    theme_config: ThemeConfig,
+    keybinds_config: KeybindsConfig,
+    dispatcher: KeyDispatcher,
+    edit_mode: Option<EditMode>,
 }
 
 impl App {
     pub fn new(config: Config, config_path: PathBuf) -> Result<Self> {
-        let theme = Theme::from_config(&config.theme)?;
-        let layout = LayoutEngine::from_config(&config.layout)?;
+        let normalized = config.normalize()?;
+        let active_profile = normalized.active_profile_config();
+
+        let theme = Theme::from_config(&normalized.theme)?;
+        let layout = LayoutEngine::from_config(active_profile)?;
 
         let mut components: HashMap<String, Box<dyn Component>> = HashMap::new();
 
-        for panel in &config.layout.panels {
+        for panel in &active_profile.panels {
             let instance_id = panel.instance_id().to_string();
-            let widget_config = config.widgets.get(&instance_id).cloned();
+            let widget_config = normalized.widgets.get(&instance_id).cloned();
 
             let descriptor = registry::get_descriptor(&panel.widget_type)
                 .expect("unknown widget type should have been caught by validation");
@@ -88,10 +99,17 @@ impl App {
         // Set initial focus to first occupied cell in reading order
         let focus = layout.occupied_cells().first().copied();
 
-        let tick_rate_ms = config.general.tick_rate;
+        let tick_rate_ms = normalized.general.tick_rate;
 
         let cancel = CancellationToken::new();
         let sysinfo_cancel = cancel.child_token();
+
+        let profile_manager = ProfileManager::new(
+            normalized.profiles.clone(),
+            &normalized.default_profile,
+        )?;
+
+        let dispatcher = KeyDispatcher::new(&normalized.keybinds)?;
 
         Ok(Self {
             should_quit: false,
@@ -121,6 +139,12 @@ impl App {
             external_disconnected: false,
             hyprland_handle: None,
             hyprland_disconnected: false,
+            profile_manager,
+            widget_configs: normalized.widgets.clone(),
+            theme_config: normalized.theme.clone(),
+            keybinds_config: normalized.keybinds.clone(),
+            dispatcher,
+            edit_mode: None,
         })
     }
 
@@ -213,7 +237,7 @@ impl App {
                                     }
                                 }
                                 for action in actions {
-                                    self.handle_action(action);
+                                    self.handle_action(action)?;
                                 }
                                 self.draw(terminal)?;
                             }
@@ -249,7 +273,7 @@ impl App {
                                     }
                                 }
                                 for action in actions {
-                                    self.handle_action(action);
+                                    self.handle_action(action)?;
                                 }
                             }
                             None => {
@@ -307,7 +331,7 @@ impl App {
                                                 if update.matches_widget_type(component.widget_type()) {
                                                     self.error_states.remove(id);
                                                 }
-                                                if let Some(a) = action { self.handle_action(a); }
+                                                if let Some(a) = action { self.handle_action(a)?; }
                                             }
                                             Err(e) => { self.error_states.insert(id.clone(), e.to_string()); }
                                         }
@@ -330,7 +354,7 @@ impl App {
                                                 if update.matches_widget_type(component.widget_type()) {
                                                     self.error_states.remove(id);
                                                 }
-                                                if let Some(a) = action { self.handle_action(a); }
+                                                if let Some(a) = action { self.handle_action(a)?; }
                                             }
                                             Err(e) => { self.error_states.insert(id.clone(), e.to_string()); }
                                         }
@@ -376,80 +400,47 @@ impl App {
     }
 
     fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Result<()> {
-        // Tier 0: Help overlay captures all input when shown
-        if self.show_help {
-            match key.code {
-                KeyCode::Char('?') | KeyCode::Esc => self.show_help = false,
-                _ => {}
-            }
-            return Ok(());
-        }
+        let mode = if self.show_help {
+            InputMode::HelpOverlay
+        } else if self.edit_mode.is_some() {
+            InputMode::Edit
+        } else if self.interact_mode {
+            InputMode::Interact
+        } else {
+            InputMode::Normal
+        };
 
-        // Tier 1: Always handled by App, regardless of mode
-        match key.code {
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-                return Ok(());
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-                return Ok(());
-            }
-            KeyCode::Char('?') => {
-                self.show_help = true;
-                return Ok(());
-            }
-            KeyCode::Char('r') => {
-                if let Some(tx) = &self.config_tx {
-                    let _ = tx.try_send(());
-                }
-                return Ok(());
-            }
-            _ => {}
-        }
-
-        // Tier 2: Interact mode — route to focused widget
-        if self.interact_mode {
-            if let Some(focus_pos) = self.focus
-                && let Some(instance_id) = self.layout.instance_at(focus_pos.0, focus_pos.1)
-                && let Some(component) = self.components.get_mut(instance_id)
-            {
-                let event = Event::Key(key);
-                if let Some(action) = component.handle_event(&event)? {
-                    self.handle_action(action);
-                }
-            }
-            return Ok(());
-        }
-
-        // Tier 3: Normal mode — focus navigation + dispatch
-        match key.code {
-            KeyCode::Tab => self.focus_next(),
-            KeyCode::BackTab => self.focus_prev(),
-            KeyCode::Up => self.focus_direction(Direction::Up),
-            KeyCode::Down => self.focus_direction(Direction::Down),
-            KeyCode::Left => self.focus_direction(Direction::Left),
-            KeyCode::Right => self.focus_direction(Direction::Right),
-            _ => {
-                if let Some(focus_pos) = self.focus
-                    && let Some(instance_id) = self.layout.instance_at(focus_pos.0, focus_pos.1)
-                    && let Some(component) = self.components.get_mut(instance_id)
-                {
-                    let event = Event::Key(key);
-                    if let Some(action) = component.handle_event(&event)? {
-                        self.handle_action(action);
-                    }
-                }
-            }
+        if let Some(action) = self.dispatcher.resolve(key, mode) {
+            self.handle_action(action)?;
+        } else if (mode == InputMode::Interact || mode == InputMode::Normal)
+            && let Some(focus) = self.focus
+            && let Some(id) = self.layout.instance_at(focus.0, focus.1)
+            && let Some(component) = self.components.get_mut(id)
+            && let Some(action) = component.handle_event(&crate::event::Event::Key(key))?
+        {
+            self.handle_action(action)?;
         }
         Ok(())
     }
 
-    fn handle_action(&mut self, action: crate::action::Action) {
+    fn handle_action(&mut self, action: crate::action::Action) -> Result<()> {
+        use crate::action::Action;
         match action {
-            crate::action::Action::Quit => self.should_quit = true,
-            crate::action::Action::Notify(msg) => self.set_notification(msg),
-            crate::action::Action::EnterInteract => {
+            Action::Quit => self.should_quit = true,
+            Action::Notify(msg) => self.set_notification(msg),
+            Action::ToggleHelp => self.show_help = !self.show_help,
+            Action::FocusNext => self.focus_next(),
+            Action::FocusPrev => self.focus_prev(),
+            Action::FocusDirection(dir) => self.focus_direction(dir),
+            Action::ReloadConfig => {
+                if let Some(tx) = &self.config_tx {
+                    let _ = tx.try_send(());
+                }
+            }
+            Action::EnterInteract => {
+                if self.edit_mode.is_some() {
+                    return Ok(());
+                }
                 if let Some(focus) = self.focus
                     && let Some(id) = self.layout.instance_at(focus.0, focus.1)
                     && !self.undersized_panels.contains(id)
@@ -460,7 +451,7 @@ impl App {
                     }
                 }
             }
-            crate::action::Action::ExitInteract => {
+            Action::ExitInteract => {
                 self.interact_mode = false;
                 if let Some(focus) = self.focus
                     && let Some(id) = self.layout.instance_at(focus.0, focus.1)
@@ -469,12 +460,151 @@ impl App {
                     component.notify_interact(false);
                 }
             }
-            _ => {}
+            Action::SwitchProfile(direction) => {
+                if self.edit_mode.is_some() || self.interact_mode {
+                    return Ok(());
+                }
+                let profile = match direction {
+                    crate::action::ProfileDirection::Next => self.profile_manager.next().clone(),
+                    crate::action::ProfileDirection::Prev => self.profile_manager.prev().clone(),
+                };
+                match self.apply_profile_switch(&profile) {
+                    Ok(()) => {
+                        self.set_notification(format!(
+                            "Switched to profile: {}",
+                            self.profile_manager.active_name()
+                        ));
+                    }
+                    Err(e) => {
+                        self.set_notification(format!("Profile switch failed: {e}"));
+                    }
+                }
+            }
+            Action::EnterEditMode => {
+                if self.interact_mode || self.edit_mode.is_some() {
+                    return Ok(());
+                }
+                let layout = self.profile_manager.active_layout().clone();
+                self.edit_mode = Some(EditMode::enter(layout));
+                self.interact_mode = false;
+            }
+            Action::EditKey(key) => {
+                if let Some(ref mut editor) = self.edit_mode {
+                    let edit_action = editor.handle_key(key);
+                    self.handle_edit_action(edit_action)?;
+                }
+            }
+            Action::ExitEditMode => {
+                self.edit_mode = None;
+            }
+            Action::SaveLayout => {
+                // Handled via EditAction::Save in handle_edit_action
+            }
+            Action::Tick | Action::Resize(..) => {}
         }
+        Ok(())
     }
 
     fn set_notification(&mut self, msg: String) {
         self.notification = Some((msg, std::time::Instant::now()));
+    }
+
+    fn apply_profile_switch(&mut self, profile: &crate::config::ProfileConfig) -> Result<()> {
+        let new_layout = LayoutEngine::from_config(profile)?;
+        let mut new_components: HashMap<String, Box<dyn Component>> = HashMap::new();
+        for panel in &profile.panels {
+            let instance_id = panel.instance_id().to_string();
+            let widget_config = self.widget_configs.get(&instance_id).cloned();
+            let descriptor = match registry::get_descriptor(&panel.widget_type) {
+                Some(d) => d,
+                None => continue,
+            };
+            let component = (descriptor.constructor)(
+                instance_id.clone(),
+                panel.widget_type.clone(),
+                widget_config,
+            )?;
+            new_components.insert(instance_id, component);
+        }
+        self.components = new_components;
+        self.layout = new_layout;
+        self.focus = self.layout.occupied_cells().first().copied();
+        self.interact_mode = false;
+        self.error_states.clear();
+        Ok(())
+    }
+
+    fn handle_edit_action(&mut self, action: EditAction) -> Result<()> {
+        match action {
+            EditAction::LayoutChanged { layout, added_widget, removed_widget } => {
+                match LayoutEngine::from_config(&layout) {
+                    Ok(new_layout) => {
+                        if let Some((ref id, ref wtype)) = added_widget
+                            && let Some(descriptor) = registry::get_descriptor(wtype)
+                        {
+                            let config = self.widget_configs.get(id).cloned();
+                            if let Ok(component) = (descriptor.constructor)(
+                                id.clone(), wtype.clone(), config,
+                            ) {
+                                self.components.insert(id.clone(), component);
+                            }
+                        }
+                        if let Some(ref id) = removed_widget {
+                            self.components.remove(id);
+                        }
+                        self.layout = new_layout;
+                        self.focus = self.layout.occupied_cells().first().copied();
+                    }
+                    Err(_) => {
+                        self.set_notification("Invalid layout change".to_string());
+                    }
+                }
+            }
+            EditAction::Save => {
+                if let Some(ref editor) = self.edit_mode {
+                    let working = editor.working_layout().clone();
+                    let active_name = self.profile_manager.active_name().to_string();
+                    self.profile_manager.update_profile(&active_name, working);
+                    let save_config = NormalizedConfig {
+                        general: crate::config::GeneralConfig {
+                            tick_rate: self.tick_rate_ms,
+                            default_profile: Some(self.profile_manager.active_name().to_string()),
+                        },
+                        profiles: self.profile_manager.profiles_map().clone(),
+                        default_profile: self.profile_manager.active_name().to_string(),
+                        theme: self.theme_config.clone(),
+                        keybinds: self.keybinds_config.clone(),
+                        widgets: self.widget_configs.clone(),
+                    };
+                    match self.profile_manager.save_to_file(&save_config, &self.config_path) {
+                        Ok(()) => self.set_notification("Layout saved".to_string()),
+                        Err(e) => self.set_notification(format!("Save failed: {e}")),
+                    }
+                }
+            }
+            EditAction::Exit => {
+                self.edit_mode = None;
+                // Revert to saved layout
+                let profile = self.profile_manager.active_layout().clone();
+                if let Ok(new_layout) = LayoutEngine::from_config(&profile) {
+                    let mut new_components: HashMap<String, Box<dyn Component>> = HashMap::new();
+                    for panel in &profile.panels {
+                        let id = panel.instance_id().to_string();
+                        let wconfig = self.widget_configs.get(&id).cloned();
+                        if let Some(desc) = registry::get_descriptor(&panel.widget_type)
+                            && let Ok(c) = (desc.constructor)(id.clone(), panel.widget_type.clone(), wconfig)
+                        {
+                            new_components.insert(id, c);
+                        }
+                    }
+                    self.components = new_components;
+                    self.layout = new_layout;
+                    self.focus = self.layout.occupied_cells().first().copied();
+                }
+            }
+            EditAction::None => {}
+        }
+        Ok(())
     }
 
     fn reload_config(
@@ -492,7 +622,15 @@ impl App {
             }
         };
 
-        let validation = new_config.validate(registry::is_known_type);
+        let normalized = match new_config.normalize() {
+            Ok(n) => n,
+            Err(e) => {
+                self.set_notification(format!("Config reload failed: {e}"));
+                return;
+            }
+        };
+
+        let validation = normalized.validate(registry::is_known_type);
         if validation.has_errors() {
             let msg = validation
                 .errors
@@ -504,8 +642,10 @@ impl App {
             return;
         }
 
+        let active_profile = normalized.active_profile_config();
+
         // 2. Build new state
-        let new_theme = match Theme::from_config(&new_config.theme) {
+        let new_theme = match Theme::from_config(&normalized.theme) {
             Ok(t) => t,
             Err(e) => {
                 self.set_notification(format!("Config reload failed: {e}"));
@@ -513,7 +653,7 @@ impl App {
             }
         };
 
-        let new_layout = match LayoutEngine::from_config(&new_config.layout) {
+        let new_layout = match LayoutEngine::from_config(active_profile) {
             Ok(l) => l,
             Err(e) => {
                 self.set_notification(format!("Config reload failed: {e}"));
@@ -523,9 +663,9 @@ impl App {
 
         let mut new_components: HashMap<String, Box<dyn Component>> = HashMap::new();
 
-        for panel in &new_config.layout.panels {
+        for panel in &active_profile.panels {
             let instance_id = panel.instance_id().to_string();
-            let widget_config = new_config.widgets.get(&instance_id).cloned();
+            let widget_config = normalized.widgets.get(&instance_id).cloned();
 
             let descriptor = match registry::get_descriptor(&panel.widget_type) {
                 Some(d) => d,
@@ -560,13 +700,39 @@ impl App {
             new_components.insert(instance_id, component);
         }
 
+        // Rebuild ProfileManager and KeyDispatcher
+        let new_profile_manager = match ProfileManager::new(
+            normalized.profiles.clone(),
+            &normalized.default_profile,
+        ) {
+            Ok(pm) => pm,
+            Err(e) => {
+                self.set_notification(format!("Config reload failed: {e}"));
+                return;
+            }
+        };
+
+        let new_dispatcher = match KeyDispatcher::new(&normalized.keybinds) {
+            Ok(d) => d,
+            Err(e) => {
+                self.set_notification(format!("Config reload failed: {e}"));
+                return;
+            }
+        };
+
         // 3. Swap
-        let tick_rate_changed = new_config.general.tick_rate != self.tick_rate_ms;
+        let tick_rate_changed = normalized.general.tick_rate != self.tick_rate_ms;
         self.components = new_components;
         self.layout = new_layout;
         self.theme = new_theme;
         self.error_states.clear();
         self.interact_mode = false;
+        self.edit_mode = None;
+        self.profile_manager = new_profile_manager;
+        self.dispatcher = new_dispatcher;
+        self.widget_configs = normalized.widgets.clone();
+        self.theme_config = normalized.theme.clone();
+        self.keybinds_config = normalized.keybinds.clone();
 
         // Recompute focus
         let occupied = self.layout.occupied_cells();
@@ -779,7 +945,12 @@ impl App {
                 let header_style = Style::new()
                     .fg(self.theme.header_fg)
                     .bg(self.theme.header_bg);
-                let header = Paragraph::new(Line::from(" mise-tui ").style(header_style))
+                let header_text = if self.edit_mode.is_some() {
+                    format!(" mise-tui — {} [EDIT MODE] ", self.profile_manager.active_name())
+                } else {
+                    format!(" mise-tui — {} ", self.profile_manager.active_name())
+                };
+                let header = Paragraph::new(Line::from(header_text).style(header_style))
                     .style(header_style);
                 frame.render_widget(header, header_area);
             }
@@ -805,7 +976,14 @@ impl App {
             // 2. Draw panels at anchor rects
             for (&(row, col), &cell_rect) in &panel_rects {
                 let is_focused = self.focus == Some((row, col));
-                let border_style = if is_focused && self.interact_mode {
+                let border_style = if let Some(ref editor) = self.edit_mode {
+                    let (cr, cc) = editor.cursor();
+                    if row == cr && col == cc {
+                        self.theme.border_focused
+                    } else {
+                        self.theme.border_edit
+                    }
+                } else if is_focused && self.interact_mode {
                     self.theme.border_interact
                 } else if is_focused {
                     self.theme.border_focused
@@ -866,6 +1044,21 @@ impl App {
 
                 let text = if let Some((ref msg, _)) = self.notification {
                     format!(" {} ", msg)
+                } else if let Some(ref editor) = self.edit_mode {
+                    let (cr, cc) = editor.cursor();
+                    let dirty = if editor.is_dirty() { " *" } else { "" };
+                    let pending = match editor.pending_op() {
+                        Some(crate::editor::PendingOp::Moving { .. }) => " | MOVING: arrows+Enter",
+                        Some(crate::editor::PendingOp::Swapping { .. }) => " | SWAPPING: arrows+Enter",
+                        Some(crate::editor::PendingOp::Adding { .. }) => " | ADDING: Up/Down+Enter",
+                        Some(crate::editor::PendingOp::ConfirmingDelete { .. }) => " | DELETE? y/n",
+                        Some(crate::editor::PendingOp::ConfirmingExit) => " | Unsaved! Esc again to discard",
+                        None => "",
+                    };
+                    format!(
+                        " [EDIT] ({},{}) | a:add d:del m:move x:swap s:save Esc:exit{}{} ",
+                        cr, cc, dirty, pending
+                    )
                 } else if self.interact_mode {
                     " [INTERACT] j/k: scroll | s/S: sort | x: signal | Esc: exit ".to_string()
                 } else {
@@ -932,6 +1125,58 @@ impl App {
                     Line::from(vec![
                         Span::styled("   Escape             ", self.theme.value),
                         Span::styled("Exit interact mode", self.theme.label),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Profiles",
+                        Style::new()
+                            .fg(self.theme.header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("   Ctrl+]             ", self.theme.value),
+                        Span::styled("Next profile", self.theme.label),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   Ctrl+[             ", self.theme.value),
+                        Span::styled("Previous profile", self.theme.label),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Edit Mode",
+                        Style::new()
+                            .fg(self.theme.header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("   e                  ", self.theme.value),
+                        Span::styled("Enter edit mode", self.theme.label),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   a / d / m / x      ", self.theme.value),
+                        Span::styled("Add / Delete / Move / Swap", self.theme.label),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   + / - / > / <      ", self.theme.value),
+                        Span::styled("Resize col/row span", self.theme.label),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   C / c / R / r      ", self.theme.value),
+                        Span::styled("Add/remove columns/rows", self.theme.label),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   s                  ", self.theme.value),
+                        Span::styled("Save layout", self.theme.label),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   u                  ", self.theme.value),
+                        Span::styled("Undo last change", self.theme.label),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   Escape             ", self.theme.value),
+                        Span::styled("Exit edit mode", self.theme.label),
                     ]),
                 ];
 
@@ -1050,7 +1295,7 @@ mod tests {
         let path = PathBuf::from("config/default.toml");
         let mut app = App::new(config, path).unwrap();
         assert!(!app.interact_mode);
-        app.handle_action(crate::action::Action::EnterInteract);
+        app.handle_action(crate::action::Action::EnterInteract).unwrap();
         assert!(app.interact_mode);
     }
 
@@ -1060,7 +1305,63 @@ mod tests {
         let path = PathBuf::from("config/default.toml");
         let mut app = App::new(config, path).unwrap();
         app.interact_mode = true;
-        app.handle_action(crate::action::Action::ExitInteract);
+        app.handle_action(crate::action::Action::ExitInteract).unwrap();
         assert!(!app.interact_mode);
+    }
+
+    #[test]
+    fn profile_name_shown_in_app() {
+        let config = crate::config::Config::parse(include_str!("../config/default.toml")).unwrap();
+        let path = PathBuf::from("config/default.toml");
+        let app = App::new(config, path).unwrap();
+        assert_eq!(app.profile_manager.active_name(), "default");
+    }
+
+    #[test]
+    fn handle_action_toggle_help() {
+        let config = crate::config::Config::parse(include_str!("../config/default.toml")).unwrap();
+        let path = PathBuf::from("config/default.toml");
+        let mut app = App::new(config, path).unwrap();
+        assert!(!app.show_help);
+        app.handle_action(crate::action::Action::ToggleHelp).unwrap();
+        assert!(app.show_help);
+        app.handle_action(crate::action::Action::ToggleHelp).unwrap();
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn handle_action_enter_edit_mode() {
+        let config = crate::config::Config::parse(include_str!("../config/default.toml")).unwrap();
+        let path = PathBuf::from("config/default.toml");
+        let mut app = App::new(config, path).unwrap();
+        assert!(app.edit_mode.is_none());
+        app.handle_action(crate::action::Action::EnterEditMode).unwrap();
+        assert!(app.edit_mode.is_some());
+    }
+
+    #[test]
+    fn handle_action_enter_edit_mode_blocked_in_interact() {
+        let config = crate::config::Config::parse(include_str!("../config/default.toml")).unwrap();
+        let path = PathBuf::from("config/default.toml");
+        let mut app = App::new(config, path).unwrap();
+        app.interact_mode = true;
+        app.handle_action(crate::action::Action::EnterEditMode).unwrap();
+        assert!(app.edit_mode.is_none());
+    }
+
+    #[test]
+    fn handle_action_switch_profile_blocked_in_edit() {
+        let config = crate::config::Config::parse(include_str!("../config/default.toml")).unwrap();
+        let path = PathBuf::from("config/default.toml");
+        let mut app = App::new(config, path).unwrap();
+        app.edit_mode = Some(crate::editor::EditMode::enter(
+            app.profile_manager.active_layout().clone(),
+        ));
+        // Switch profile should be blocked
+        app.handle_action(crate::action::Action::SwitchProfile(
+            crate::action::ProfileDirection::Next,
+        )).unwrap();
+        // Profile should not have changed (only one profile in default config)
+        assert_eq!(app.profile_manager.active_name(), "default");
     }
 }

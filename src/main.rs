@@ -48,7 +48,8 @@ async fn main() -> Result<()> {
     }
 
     let config = config::Config::load(Some(&config_path))?;
-    let validation = config.validate(registry::is_known_type);
+    let normalized = config.normalize()?;
+    let validation = normalized.validate(registry::is_known_type);
     for warning in &validation.warnings {
         eprintln!("config warning: {:?}", warning);
     }
